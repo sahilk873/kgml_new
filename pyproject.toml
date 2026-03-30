@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kgml-new"
+version = "0.1.0"
+description = "PyTorch Geometric GraphSAGE and edge-aware semantic GraphSAGE (no Kedro)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "networkx>=3.0",
+    "numpy>=1.24",
+    "scikit-learn>=1.3",
+    "torch>=2.0",
+    "torch-geometric>=2.4",
+    "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+semantic = ["openai>=1.0", "python-dotenv>=1.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+kgml-new-link-pred = "kgml_new.scripts.run_link_prediction:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

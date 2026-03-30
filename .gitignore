@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info
+.eggs/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+.ruff_cache/
+
+# Data files (download using scripts/setup_hpc.sh)
+/kg.csv
+/data/
