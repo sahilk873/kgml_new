@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import torch
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from kgml_new.data.relations import RELATION_DESCRIPTIONS, get_edge_types
 
