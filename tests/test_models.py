@@ -12,7 +12,7 @@ from kgml_new.embeddings.semantic import build_relation_tensor
 from kgml_new.models.baseline_gcn import BaselineGCN
 from kgml_new.models.baseline_sage import BaselineGraphSAGE
 from kgml_new.models.edge_aware_sage import EdgeAwareGraphSAGE
-from kgml_new.training.eval import link_prediction_sklearn
+from kgml_new.training.eval import link_prediction_dot_product
 from kgml_new.training.link_unsupervised import compute_node_embeddings, train_unsupervised
 
 
@@ -175,7 +175,7 @@ def test_primekg_link_prediction_eval():
     n_pos = train_pos.shape[1]
     neg_edge_index = torch.randint(0, data.num_nodes, (2, n_pos))
 
-    metrics = link_prediction_sklearn(z, train_pos, neg_edge_index)
+    metrics = link_prediction_dot_product(z, train_pos, neg_edge_index)
     assert "roc_auc" in metrics
     assert "average_precision" in metrics
     assert 0 <= metrics["roc_auc"] <= 1

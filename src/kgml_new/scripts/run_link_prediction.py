@@ -15,11 +15,12 @@ from kgml_new.embeddings.semantic import (
 )
 from kgml_new.models.baseline_sage import BaselineGraphSAGE
 from kgml_new.models.edge_aware_sage import EdgeAwareGraphSAGE
-from kgml_new.training.eval import link_prediction_sklearn
+from kgml_new.training.eval import link_prediction_dot_product
 from kgml_new.training.link_unsupervised import (
     compute_node_embeddings,
     train_unsupervised,
 )
+from kgml_new.training.splits import build_train_graph_data, create_edge_split
 
 
 def _load_graph(path: Path) -> nx.Graph:
@@ -70,7 +71,31 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     mask = data.edge_index[0] < data.edge_index[1]
-    train_pos = data.edge_index[:, mask].clone()
+    pos_edge_index = data.edge_index[:, mask].clone()
+    pos_edge_attr = data.edge_attr[mask].clone() if hasattr(data, "edge_attr") else None
+    split = create_edge_split(
+        pos_edge_index,
+        num_src_nodes=int(data.num_nodes),
+        val_ratio=0.1,
+        test_ratio=0.1,
+        seed=cfg.seed,
+        undirected=True,
+    )
+    train_pos = split.train_pos_edge_index
+    train_pos_attr = None
+    if pos_edge_attr is not None:
+        key_to_idx = {
+            (int(pos_edge_index[0, i]), int(pos_edge_index[1, i])): i
+            for i in range(pos_edge_index.size(1))
+        }
+        train_indices = [
+            key_to_idx[(int(train_pos[0, i]), int(train_pos[1, i]))]
+            for i in range(train_pos.size(1))
+        ]
+        train_pos_attr = pos_edge_attr[torch.tensor(train_indices, dtype=torch.long)]
+    train_data = build_train_graph_data(
+        data, train_pos, train_pos_edge_attr=train_pos_attr
+    )
 
     if args.model == "sage":
         model = BaselineGraphSAGE(
@@ -82,13 +107,13 @@ def main() -> None:
         )
         train_unsupervised(
             model,
-            data,
+            train_data,
             train_pos,
             cfg,
             device=device,
             edge_aware=False,
         )
-        z = compute_node_embeddings(model, data, device, edge_aware=False)
+        z = compute_node_embeddings(model, train_data, device, edge_aware=False)
     else:
         if args.semantic:
             rel_emb = relation_embeddings_from_graph(
@@ -118,24 +143,26 @@ def main() -> None:
         )
         train_unsupervised(
             model,
-            data,
+            train_data,
             train_pos,
             cfg,
             device=device,
             edge_aware=True,
         )
-        z = compute_node_embeddings(model, data, device, edge_aware=True)
+        z = compute_node_embeddings(model, train_data, device, edge_aware=True)
 
     print(f"Embeddings shape: {tuple(z.shape)}")
 
-    n_edges = data.edge_index.size(1) // 2
-    if n_edges > 1:
-        mid = n_edges // 2
-        ei = data.edge_index[:, :n_edges]
-        pos = ei[:, :mid]
-        neg = torch.randint(0, data.num_nodes, (2, mid), device=z.device)
-        metrics = link_prediction_sklearn(z.cpu(), pos.cpu(), neg.cpu())
-        print("quick eval (random negatives):", metrics)
+    if split.val_pos_edge_index.numel() > 0:
+        val_metrics = link_prediction_dot_product(
+            z, split.val_pos_edge_index.to(z.device), split.val_neg_edge_index.to(z.device)
+        )
+        print("validation metrics:", val_metrics)
+    if split.test_pos_edge_index.numel() > 0:
+        test_metrics = link_prediction_dot_product(
+            z, split.test_pos_edge_index.to(z.device), split.test_neg_edge_index.to(z.device)
+        )
+        print("test metrics:", test_metrics)
 
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)

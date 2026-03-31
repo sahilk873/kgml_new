@@ -1,4 +1,8 @@
-from kgml_new.training.eval import link_prediction_mlp_torch, link_prediction_sklearn
+from kgml_new.training.eval import (
+    link_prediction_dot_product,
+    link_prediction_mlp_torch,
+    link_prediction_sklearn,
+)
 from kgml_new.training.history import TrainingHistory
 from kgml_new.training.link_unsupervised import (
     compute_node_embeddings,
@@ -20,6 +24,7 @@ from kgml_new.training.txgnn_train import TxGNNTrainResult, evaluate_relation, t
 __all__ = [
     "compute_node_embeddings",
     "create_train_val_split",
+    "link_prediction_dot_product",
     "link_prediction_mlp_torch",
     "link_prediction_sklearn",
     "TrainingHistory",

@@ -131,7 +131,7 @@ def _train_unsupervised_fullgraph(
     save_every_epochs: int = 1,
 ) -> tuple[nn.Module, int, TrainingHistory]:
     """Full-graph training (no neighbor sampling) with history tracking."""
-    from kgml_new.training.eval import link_prediction_sklearn
+    from kgml_new.training.eval import link_prediction_dot_product
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -147,6 +147,8 @@ def _train_unsupervised_fullgraph(
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
     degrees = torch.bincount(data.edge_index[0], minlength=n).float().clamp_min(1.0)
+    weights = degrees.pow(0.75)
+    weights = weights / weights.sum()
     ckpt_path = Path(checkpoint_path) if checkpoint_path else None
     start_epoch = 0
     if resume and ckpt_path and ckpt_path.is_file():
@@ -169,24 +171,21 @@ def _train_unsupervised_fullgraph(
 
     for epoch in range(start_epoch, config.epochs):
         model.train()
-        optimizer.zero_grad()
-        z = _encode(model, data, device, edge_aware)
-
         perm = torch.randperm(pos.size(1), device=device)
-        total_loss = torch.zeros((), device=device)
+        total_loss = 0.0
         num_batches = 0
         for start in range(0, pos.size(1), config.batch_size):
             sl = perm[start : start + config.batch_size]
             s, d = pos[0, sl], pos[1, sl]
             if s.numel() == 0:
                 continue
+            optimizer.zero_grad()
+            z = _encode(model, data, device, edge_aware)
             pos_logits = (z[s] * z[d]).sum(dim=-1)
             pos_loss = F.binary_cross_entropy_with_logits(
                 pos_logits, torch.ones_like(pos_logits), reduction="sum"
             )
 
-            weights = degrees.pow(0.75)
-            weights = weights / weights.sum()
             neg = torch.multinomial(
                 weights, num_samples=s.size(0) * config.neg_samples, replacement=True
             )
@@ -199,14 +198,12 @@ def _train_unsupervised_fullgraph(
             )
 
             batch_loss = (pos_loss + neg_loss) / max(s.numel(), 1)
-            total_loss = total_loss + batch_loss
+            batch_loss.backward()
+            optimizer.step()
+            total_loss += float(batch_loss.detach())
             num_batches += 1
 
-        if num_batches > 0:
-            (total_loss / num_batches).backward()
-            optimizer.step()
-
-        avg_loss = float((total_loss / max(num_batches, 1)).detach())
+        avg_loss = total_loss / max(num_batches, 1)
         last_epoch = epoch
 
         history.epoch.append(epoch)
@@ -218,7 +215,7 @@ def _train_unsupervised_fullgraph(
         if val_pos_edge_index is not None and val_neg_edge_index is not None:
             with torch.inference_mode():
                 z_eval = _encode(model, data, device, edge_aware)
-            metrics = link_prediction_sklearn(
+            metrics = link_prediction_dot_product(
                 z_eval, val_pos_edge_index, val_neg_edge_index
             )
             val_auc = metrics["roc_auc"]
@@ -270,7 +267,7 @@ def _train_unsupervised_batched(
     Batched link prediction using LinkNeighborLoader (original GraphSAGE algorithm).
     Uses mini-batch neighbor sampling to scale to millions of edges.
     """
-    from kgml_new.training.eval import link_prediction_sklearn
+    from kgml_new.training.eval import link_prediction_dot_product
     from torch_geometric.loader import LinkNeighborLoader
     from torch_geometric.typing import WITH_PYG_LIB, WITH_TORCH_SPARSE
 
@@ -404,7 +401,7 @@ def _train_unsupervised_batched(
         if val_pos_edge_index is not None and val_neg_edge_index is not None:
             with torch.inference_mode():
                 z_eval = _encode(model, data, device, edge_aware)
-            metrics = link_prediction_sklearn(
+            metrics = link_prediction_dot_product(
                 z_eval, val_pos_edge_index, val_neg_edge_index
             )
             val_auc = metrics["roc_auc"]
@@ -471,21 +468,19 @@ def create_train_val_split(
         - val_pos: Validation positive edges
         - val_neg_edge_index: Validation negative edges [2, num_val]
     """
-    torch.manual_seed(seed)
+    from kgml_new.training.splits import create_edge_split
 
-    num_edges = edge_index.size(1)
-    num_val = int(num_edges * val_ratio)
-
-    perm = torch.randperm(num_edges)
-    val_idx = perm[:num_val]
-    train_idx = perm[num_val:]
-
-    train_pos = edge_index[:, train_idx]
-    val_pos = edge_index[:, val_idx]
-
-    num_nodes = edge_index.max().item() + 1
-    val_neg_src = torch.randint(0, num_nodes, (num_val,), dtype=torch.long)
-    val_neg_dst = torch.randint(0, num_nodes, (num_val,), dtype=torch.long)
-    val_neg_edge_index = torch.stack([val_neg_src, val_neg_dst], dim=0)
-
-    return train_pos, val_pos, val_neg_edge_index
+    num_nodes = int(edge_index.max().item()) + 1 if edge_index.numel() else 0
+    split = create_edge_split(
+        edge_index,
+        num_src_nodes=num_nodes,
+        val_ratio=val_ratio,
+        test_ratio=0.0,
+        seed=seed,
+        undirected=True,
+    )
+    return (
+        split.train_pos_edge_index,
+        split.val_pos_edge_index,
+        split.val_neg_edge_index,
+    )

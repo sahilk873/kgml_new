@@ -9,13 +9,14 @@ import torch
 from kgml_new.data.hetero import networkx_to_heterodata
 from kgml_new.data.primekg import load_primekg_csv
 from kgml_new.models.txgnn import TxGNN
+from kgml_new.training.splits import create_edge_split
 from kgml_new.training.txgnn_train import evaluate_relation, train_txgnn
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train TxGNN-style hetero model on PrimeKG.")
     parser.add_argument("--csv", type=Path, default=Path("kg.csv"))
-    parser.add_argument("--max-edges", type=int, default=10000)
+    parser.add_argument("--max-edges", type=int, default=None)
     parser.add_argument("--relation", type=str, default="indication")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=1024)
@@ -23,17 +24,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
-
-
-def _train_val_split(edge_index: torch.Tensor, val_ratio: float, seed: int) -> tuple[torch.Tensor, torch.Tensor]:
-    torch.manual_seed(seed)
-    num_edges = edge_index.size(1)
-    val_count = max(1, int(num_edges * val_ratio))
-    perm = torch.randperm(num_edges)
-    val_idx = perm[:val_count]
-    train_idx = perm[val_count:]
-    return edge_index[:, train_idx], edge_index[:, val_idx]
-
 
 def main() -> None:
     args = parse_args()
@@ -46,8 +36,25 @@ def main() -> None:
     if edge_type not in data.edge_types:
         raise ValueError(f"Edge type {edge_type} not in hetero graph edge types: {data.edge_types}")
 
-    train_pos, val_pos = _train_val_split(data[edge_type].edge_index, val_ratio=0.2, seed=args.seed)
+    split = create_edge_split(
+        data[edge_type].edge_index.cpu(),
+        num_src_nodes=int(data["drug"].num_nodes),
+        num_dst_nodes=int(data["disease"].num_nodes),
+        val_ratio=0.1,
+        test_ratio=0.1,
+        seed=args.seed,
+        undirected=False,
+    )
+    train_pos = split.train_pos_edge_index
+    val_pos = split.val_pos_edge_index
+    test_pos = split.test_pos_edge_index
+    val_neg = split.val_neg_edge_index
+    test_neg = split.test_neg_edge_index
+
     data[edge_type].edge_index = train_pos
+    rev_edge_type = (edge_type[2], f"rev_{edge_type[1]}", edge_type[0])
+    if rev_edge_type in data.edge_types:
+        data[rev_edge_type].edge_index = train_pos.flip(0)
 
     model = TxGNN(
         metadata=data.metadata(),
@@ -71,14 +78,8 @@ def main() -> None:
         device=device,
     )
 
-    val_neg = torch.stack(
-        [
-            torch.randint(0, data["drug"].num_nodes, (val_pos.size(1),)),
-            torch.randint(0, data["disease"].num_nodes, (val_pos.size(1),)),
-        ],
-        dim=0,
-    )
     val_auc, val_ap = evaluate_relation(model, data, edge_type, val_pos, val_neg, device)
+    test_auc, test_ap = evaluate_relation(model, data, edge_type, test_pos, test_neg, device)
 
     output = {
         "method": "txgnn",
@@ -87,12 +88,16 @@ def main() -> None:
         "num_nodes": {k: int(v.num_nodes) for k, v in data.node_items()},
         "num_train_edges": int(train_pos.size(1)),
         "num_val_edges": int(val_pos.size(1)),
+        "num_test_edges": int(test_pos.size(1)),
+        "evaluation_protocol": "train-only relation graph with reverse edges updated; held-out val/test positives; true sampled bipartite non-edge negatives",
         "history": {
             "train_loss": history.train_loss,
             "val_auc": history.val_auc,
             "val_ap": history.val_ap,
         },
-        "final_metrics": {"roc_auc": float(val_auc), "average_precision": float(val_ap)},
+        "val_metrics": {"roc_auc": float(val_auc), "average_precision": float(val_ap)},
+        "test_metrics": {"roc_auc": float(test_auc), "average_precision": float(test_ap)},
+        "final_metrics": {"roc_auc": float(test_auc), "average_precision": float(test_ap)},
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(output, indent=2))

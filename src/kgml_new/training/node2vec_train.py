@@ -8,7 +8,7 @@ from torch_geometric.data import Data
 
 from kgml_new.config import Node2VecConfig
 from kgml_new.io.artifacts import torch_load_checkpoint, torch_save_checkpoint
-from kgml_new.training.eval import link_prediction_sklearn
+from kgml_new.training.eval import link_prediction_dot_product
 from kgml_new.training.history import TrainingHistory
 from kgml_new.models.lightweight_node2vec import train_lightweight_node2vec
 
@@ -165,7 +165,9 @@ def train_node2vec_embeddings_with_validation(
         history.learning_rate.append(cfg.learning_rate)
         history.batch_count.append(0)
         if val_pos_edge_index is not None and val_neg_edge_index is not None:
-            metrics = link_prediction_sklearn(z_eval, val_pos_edge_index, val_neg_edge_index)
+            metrics = link_prediction_dot_product(
+                z_eval, val_pos_edge_index, val_neg_edge_index
+            )
             history.val_auc.append(metrics["roc_auc"])
             history.val_ap.append(metrics["average_precision"])
 

@@ -14,6 +14,7 @@ from kgml_new.training.link_unsupervised import (
     train_unsupervised_batched,
     train_unsupervised_fullgraph,
 )
+from kgml_new.training.splits import build_train_graph_data, create_edge_split
 
 
 def test_train_unsupervised_runs():
@@ -59,6 +60,58 @@ def test_create_train_val_split_shapes():
     assert val_neg.shape[0] == 2
     assert train_pos.shape[1] + val_pos.shape[1] == pos.shape[1]
     assert val_neg.shape[1] == val_pos.shape[1]
+
+
+def test_create_edge_split_negatives_are_true_non_edges():
+    data, _ = networkx_to_data(_toy_graph(), in_dim=16, seed=0)
+    mask = data.edge_index[0] < data.edge_index[1]
+    pos = data.edge_index[:, mask]
+
+    split = create_edge_split(
+        pos,
+        num_src_nodes=int(data.num_nodes),
+        val_ratio=0.25,
+        test_ratio=0.25,
+        seed=0,
+        undirected=True,
+    )
+
+    positive_pairs = {
+        tuple(sorted((int(pos[0, i]), int(pos[1, i]))))
+        for i in range(pos.size(1))
+    }
+    for neg_edges in (split.val_neg_edge_index, split.test_neg_edge_index):
+        for i in range(neg_edges.size(1)):
+            pair = tuple(sorted((int(neg_edges[0, i]), int(neg_edges[1, i]))))
+            assert pair not in positive_pairs
+            assert pair[0] != pair[1]
+
+
+def test_build_train_graph_data_excludes_held_out_edges():
+    data, _ = networkx_to_data(_toy_graph(), in_dim=16, seed=0)
+    mask = data.edge_index[0] < data.edge_index[1]
+    pos = data.edge_index[:, mask]
+
+    split = create_edge_split(
+        pos,
+        num_src_nodes=int(data.num_nodes),
+        val_ratio=0.25,
+        test_ratio=0.25,
+        seed=0,
+        undirected=True,
+    )
+    train_data = build_train_graph_data(data, split.train_pos_edge_index)
+
+    directed_pairs = {
+        (int(train_data.edge_index[0, i]), int(train_data.edge_index[1, i]))
+        for i in range(train_data.edge_index.size(1))
+    }
+    for held_out in (split.val_pos_edge_index, split.test_pos_edge_index):
+        for i in range(held_out.size(1)):
+            src = int(held_out[0, i])
+            dst = int(held_out[1, i])
+            assert (src, dst) not in directed_pairs
+            assert (dst, src) not in directed_pairs
 
 
 def test_train_unsupervised_fullgraph_with_validation_smoke(tmp_path):
