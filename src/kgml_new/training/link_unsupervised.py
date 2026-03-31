@@ -9,6 +9,7 @@ from torch import nn
 from torch_geometric.data import Data
 
 from kgml_new.config import TrainConfig
+from kgml_new.training.history import TrainingHistory
 from kgml_new.io.artifacts import torch_load_checkpoint, torch_save_checkpoint
 
 
@@ -33,91 +34,86 @@ def train_unsupervised(
     save_every_epochs: int = 1,
 ) -> tuple[nn.Module, int]:
     """
-    Unsupervised link prediction: dot-product on positives vs sampled negatives.
-    One full-graph forward per epoch, edge mini-batches summed into a single
-    backward step.
+    Default unsupervised GraphSAGE-style training path.
 
-    Supports checkpointing/resume (model + optimizer) when ``checkpoint_path`` is set.
+    Uses neighbor-sampled mini-batch training when the PyG sampling backend is
+    available, and falls back to the explicit full-graph trainer otherwise.
     """
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    model = model.to(device)
-    data = data.to(device)
-    pos = train_pos_edge_index.to(device)
-    n = int(data.num_nodes)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
-    degrees = torch.bincount(data.edge_index[0], minlength=n).float().clamp_min(1.0)
-
-    start_epoch = 0
-    ckpt_path = Path(checkpoint_path) if checkpoint_path else None
-    if resume and ckpt_path and ckpt_path.is_file():
-        ckpt = torch_load_checkpoint(ckpt_path, map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"])
-        if ckpt.get("optimizer_state_dict"):
-            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        start_epoch = int(ckpt.get("epoch", -1)) + 1
-        print(f"Resuming training from epoch {start_epoch} (checkpoint epoch was {ckpt.get('epoch')})")
-
-    last_epoch = start_epoch - 1
-    if start_epoch >= config.epochs:
-        print(f"Training already at epoch >= {config.epochs}; skipping training loop.")
-
-    for epoch in range(start_epoch, config.epochs):
-        model.train()
-        optimizer.zero_grad()
-        z = _encode(model, data, device, edge_aware)
-
-        perm = torch.randperm(pos.size(1), device=device)
-        total_loss = torch.zeros((), device=device)
-        num_batches = 0
-
-        for start in range(0, pos.size(1), config.batch_size):
-            sl = perm[start : start + config.batch_size]
-            s, d = pos[0, sl], pos[1, sl]
-            if s.numel() == 0:
-                continue
-            pos_logits = (z[s] * z[d]).sum(dim=-1)
-            pos_loss = F.binary_cross_entropy_with_logits(
-                pos_logits, torch.ones_like(pos_logits), reduction="sum"
-            )
-
-            weights = degrees.pow(0.75)
-            weights = weights / weights.sum()
-            neg = torch.multinomial(weights, num_samples=s.size(0) * config.neg_samples, replacement=True)
-            neg = neg.view(s.size(0), config.neg_samples)
-
-            src_exp = s.unsqueeze(1).expand_as(neg)
-            neg_logits = (z[src_exp] * z[neg]).sum(dim=-1)
-            neg_loss = F.binary_cross_entropy_with_logits(
-                neg_logits, torch.zeros_like(neg_logits), reduction="sum"
-            )
-
-            batch_loss = (pos_loss + neg_loss) / max(s.numel(), 1)
-            total_loss = total_loss + batch_loss
-            num_batches += 1
-
-        if num_batches > 0:
-            (total_loss / num_batches).backward()
-            optimizer.step()
-
-        last_epoch = epoch
-        if epoch % 10 == 0 or epoch == config.epochs - 1:
-            avg = float((total_loss / max(num_batches, 1)).detach())
-            print(f"epoch {epoch:04d} loss={avg:.4f} device={device}")
-
-        if ckpt_path is not None and save_every_epochs > 0:
-            if (epoch + 1) % save_every_epochs == 0 or epoch == config.epochs - 1:
-                torch_save_checkpoint(
-                    ckpt_path,
-                    epoch=epoch,
-                    model_state_dict=model.state_dict(),
-                    optimizer_state_dict=optimizer.state_dict(),
-                    extra={"train_config": asdict(config), "edge_aware": edge_aware},
-                )
-
+    model, last_epoch, _ = train_unsupervised_batched(
+        model=model,
+        data=data,
+        train_pos_edge_index=train_pos_edge_index,
+        config=config,
+        device=device,
+        edge_aware=edge_aware,
+        num_neighbors=config.num_neighbors,
+        checkpoint_path=checkpoint_path,
+        resume=resume,
+        save_every_epochs=save_every_epochs,
+    )
     return model, last_epoch
+
+
+def train_unsupervised_fullgraph(
+    model: nn.Module,
+    data: Data,
+    train_pos_edge_index: torch.Tensor,
+    config: TrainConfig,
+    device: torch.device | None = None,
+    edge_aware: bool = False,
+    val_pos_edge_index: torch.Tensor | None = None,
+    val_neg_edge_index: torch.Tensor | None = None,
+    history_path: Path | None = None,
+    checkpoint_path: str | Path | None = None,
+    resume: bool = False,
+    save_every_epochs: int = 1,
+) -> tuple[nn.Module, int, TrainingHistory]:
+    return _train_unsupervised_fullgraph(
+        model=model,
+        data=data,
+        train_pos_edge_index=train_pos_edge_index,
+        config=config,
+        device=device,
+        edge_aware=edge_aware,
+        val_pos_edge_index=val_pos_edge_index,
+        val_neg_edge_index=val_neg_edge_index,
+        history_path=history_path,
+        checkpoint_path=checkpoint_path,
+        resume=resume,
+        save_every_epochs=save_every_epochs,
+    )
+
+
+def train_unsupervised_batched(
+    model: nn.Module,
+    data: Data,
+    train_pos_edge_index: torch.Tensor,
+    config: TrainConfig,
+    device: torch.device | None = None,
+    edge_aware: bool = False,
+    num_neighbors: list[int] | None = None,
+    val_pos_edge_index: torch.Tensor | None = None,
+    val_neg_edge_index: torch.Tensor | None = None,
+    history_path: Path | None = None,
+    checkpoint_path: str | Path | None = None,
+    resume: bool = False,
+    save_every_epochs: int = 1,
+) -> tuple[nn.Module, int, TrainingHistory]:
+    return _train_unsupervised_batched(
+        model=model,
+        data=data,
+        train_pos_edge_index=train_pos_edge_index,
+        config=config,
+        device=device,
+        edge_aware=edge_aware,
+        num_neighbors=num_neighbors,
+        val_pos_edge_index=val_pos_edge_index,
+        val_neg_edge_index=val_neg_edge_index,
+        history_path=history_path,
+        checkpoint_path=checkpoint_path,
+        resume=resume,
+        save_every_epochs=save_every_epochs,
+    )
 
 
 def _train_unsupervised_fullgraph(
@@ -130,6 +126,9 @@ def _train_unsupervised_fullgraph(
     val_pos_edge_index: torch.Tensor | None = None,
     val_neg_edge_index: torch.Tensor | None = None,
     history_path: Path | None = None,
+    checkpoint_path: str | Path | None = None,
+    resume: bool = False,
+    save_every_epochs: int = 1,
 ) -> tuple[nn.Module, int, TrainingHistory]:
     """Full-graph training (no neighbor sampling) with history tracking."""
     from kgml_new.training.eval import link_prediction_sklearn
@@ -148,11 +147,27 @@ def _train_unsupervised_fullgraph(
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
     degrees = torch.bincount(data.edge_index[0], minlength=n).float().clamp_min(1.0)
+    ckpt_path = Path(checkpoint_path) if checkpoint_path else None
+    start_epoch = 0
+    if resume and ckpt_path and ckpt_path.is_file():
+        ckpt = torch_load_checkpoint(ckpt_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        if ckpt.get("optimizer_state_dict"):
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_epoch = int(ckpt.get("epoch", -1)) + 1
+        print(
+            f"Resuming full-graph training from epoch {start_epoch}"
+            f" (checkpoint epoch was {ckpt.get('epoch')})"
+        )
 
     history = TrainingHistory(edge_aware=edge_aware, num_neighbors=None)
     history.config = asdict(config)
 
-    for epoch in range(config.epochs):
+    last_epoch = start_epoch - 1
+    if start_epoch >= config.epochs:
+        print(f"Training already at epoch >= {config.epochs}; skipping training loop.")
+
+    for epoch in range(start_epoch, config.epochs):
         model.train()
         optimizer.zero_grad()
         z = _encode(model, data, device, edge_aware)
@@ -192,6 +207,7 @@ def _train_unsupervised_fullgraph(
             optimizer.step()
 
         avg_loss = float((total_loss / max(num_batches, 1)).detach())
+        last_epoch = epoch
 
         history.epoch.append(epoch)
         history.train_loss.append(avg_loss)
@@ -211,14 +227,28 @@ def _train_unsupervised_fullgraph(
             history.val_ap.append(val_ap)
 
         if epoch % 10 == 0 or epoch == config.epochs - 1:
-            val_str = f" val_auc={val_auc:.4f} val_ap={val_ap:.4f}" if val_auc else ""
+            val_str = (
+                f" val_auc={val_auc:.4f} val_ap={val_ap:.4f}"
+                if val_auc is not None and val_ap is not None
+                else ""
+            )
             print(f"epoch {epoch:04d} loss={avg_loss:.4f}{val_str} device={device}")
+
+        if ckpt_path is not None and save_every_epochs > 0:
+            if (epoch + 1) % save_every_epochs == 0 or epoch == config.epochs - 1:
+                torch_save_checkpoint(
+                    ckpt_path,
+                    epoch=epoch,
+                    model_state_dict=model.state_dict(),
+                    optimizer_state_dict=optimizer.state_dict(),
+                    extra={"train_config": asdict(config), "edge_aware": edge_aware},
+                )
 
     if history_path:
         history.save(history_path)
         print(history.summary())
 
-    return model, config.epochs - 1, history
+    return model, last_epoch, history
 
 
 def _train_unsupervised_batched(
@@ -232,12 +262,36 @@ def _train_unsupervised_batched(
     val_pos_edge_index: torch.Tensor | None = None,
     val_neg_edge_index: torch.Tensor | None = None,
     history_path: Path | None = None,
+    checkpoint_path: str | Path | None = None,
+    resume: bool = False,
+    save_every_epochs: int = 1,
 ) -> tuple[nn.Module, int, TrainingHistory]:
     """
     Batched link prediction using LinkNeighborLoader (original GraphSAGE algorithm).
     Uses mini-batch neighbor sampling to scale to millions of edges.
     """
     from kgml_new.training.eval import link_prediction_sklearn
+    from torch_geometric.loader import LinkNeighborLoader
+    from torch_geometric.typing import WITH_PYG_LIB, WITH_TORCH_SPARSE
+
+    if not WITH_PYG_LIB and not WITH_TORCH_SPARSE:
+        print(
+            "Neighbor sampling backend unavailable; falling back to full-graph training."
+        )
+        return _train_unsupervised_fullgraph(
+            model=model,
+            data=data,
+            train_pos_edge_index=train_pos_edge_index,
+            config=config,
+            device=device,
+            edge_aware=edge_aware,
+            val_pos_edge_index=val_pos_edge_index,
+            val_neg_edge_index=val_neg_edge_index,
+            history_path=history_path,
+            checkpoint_path=checkpoint_path,
+            resume=resume,
+            save_every_epochs=save_every_epochs,
+        )
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -255,6 +309,18 @@ def _train_unsupervised_batched(
         num_neighbors = config.num_neighbors
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
+    ckpt_path = Path(checkpoint_path) if checkpoint_path else None
+    start_epoch = 0
+    if resume and ckpt_path and ckpt_path.is_file():
+        ckpt = torch_load_checkpoint(ckpt_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        if ckpt.get("optimizer_state_dict"):
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_epoch = int(ckpt.get("epoch", -1)) + 1
+        print(
+            f"Resuming batched training from epoch {start_epoch}"
+            f" (checkpoint epoch was {ckpt.get('epoch')})"
+        )
 
     edge_labels = torch.ones(pos.size(1), dtype=torch.float32, device=device)
     data.edge_label = edge_labels
@@ -272,7 +338,11 @@ def _train_unsupervised_batched(
     history = TrainingHistory(edge_aware=edge_aware, num_neighbors=num_neighbors)
     history.config = asdict(config)
 
-    for epoch in range(config.epochs):
+    last_epoch = start_epoch - 1
+    if start_epoch >= config.epochs:
+        print(f"Training already at epoch >= {config.epochs}; skipping training loop.")
+
+    for epoch in range(start_epoch, config.epochs):
         model.train()
         total_loss = 0.0
         num_batches = 0
@@ -323,6 +393,7 @@ def _train_unsupervised_batched(
             num_batches += 1
 
         avg_loss = total_loss / max(num_batches, 1)
+        last_epoch = epoch
 
         history.epoch.append(epoch)
         history.train_loss.append(avg_loss)
@@ -344,16 +415,30 @@ def _train_unsupervised_batched(
         if epoch % 10 == 0 or epoch == config.epochs - 1:
             val_str = (
                 f" val_auc={val_auc:.4f} val_ap={val_ap:.4f}"
-                if val_auc
+                if val_auc is not None and val_ap is not None
                 else f" batches={num_batches}"
             )
             print(f"epoch {epoch:04d} loss={avg_loss:.4f}{val_str} device={device}")
+
+        if ckpt_path is not None and save_every_epochs > 0:
+            if (epoch + 1) % save_every_epochs == 0 or epoch == config.epochs - 1:
+                torch_save_checkpoint(
+                    ckpt_path,
+                    epoch=epoch,
+                    model_state_dict=model.state_dict(),
+                    optimizer_state_dict=optimizer.state_dict(),
+                    extra={
+                        "train_config": asdict(config),
+                        "edge_aware": edge_aware,
+                        "num_neighbors": num_neighbors,
+                    },
+                )
 
     if history_path:
         history.save(history_path)
         print(history.summary())
 
-    return model, config.epochs - 1, history
+    return model, last_epoch, history
 
 
 @torch.inference_mode()
@@ -371,7 +456,7 @@ def create_train_val_split(
     edge_index: torch.Tensor,
     val_ratio: float = 0.15,
     seed: int = 42,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Split edge_index into train and validation sets.
 
@@ -381,10 +466,10 @@ def create_train_val_split(
         seed: Random seed
 
     Returns:
-        (train_pos, val_pos, val_neg_src, val_neg_dst)
+        (train_pos, val_pos, val_neg_edge_index)
         - train_pos: Training positive edges
         - val_pos: Validation positive edges
-        - val_neg_src, val_neg_dst: Validation negative edges
+        - val_neg_edge_index: Validation negative edges [2, num_val]
     """
     torch.manual_seed(seed)
 
@@ -401,5 +486,6 @@ def create_train_val_split(
     num_nodes = edge_index.max().item() + 1
     val_neg_src = torch.randint(0, num_nodes, (num_val,), dtype=torch.long)
     val_neg_dst = torch.randint(0, num_nodes, (num_val,), dtype=torch.long)
+    val_neg_edge_index = torch.stack([val_neg_src, val_neg_dst], dim=0)
 
-    return train_pos, val_pos, val_neg_src, val_neg_dst
+    return train_pos, val_pos, val_neg_edge_index

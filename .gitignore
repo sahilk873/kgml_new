@@ -10,7 +10,11 @@ build/
 .coverage
 htmlcov/
 .venv/
+.venv_legacy_gpu/
 .ruff_cache/
+logs/
+results/
+=*
 
 # Data files (download using scripts/setup_hpc.sh)
 /kg.csv

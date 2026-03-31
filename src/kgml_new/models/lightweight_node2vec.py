@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import random
-from collections import deque
 from typing import Iterator
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor
 
 
@@ -38,6 +38,19 @@ class Node2VecEmbedding(nn.Module):
     def forward(self, batch: Tensor) -> Tensor:
         return self.embedding(batch)
 
+    def loss(self, pos_rw: Tensor, neg_rw: Tensor) -> Tensor:
+        src_pos = self.embedding(pos_rw[:, 0])
+        dst_pos = self.embedding(pos_rw[:, 1])
+        pos_score = (src_pos * dst_pos).sum(dim=-1)
+        pos_loss = -F.logsigmoid(pos_score).mean()
+
+        src_neg = self.embedding(neg_rw[:, 0])
+        dst_neg = self.embedding(neg_rw[:, 1])
+        neg_score = (src_neg * dst_neg).sum(dim=-1)
+        neg_loss = -F.logsigmoid(-neg_score).mean()
+
+        return pos_loss + neg_loss
+
 
 def train_lightweight_node2vec(
     edge_index: Tensor,
@@ -55,11 +68,9 @@ def train_lightweight_node2vec(
     checkpoint_path=None,
     resume=False,
     save_every_epochs: int = 1,
+    epoch_callback=None,
 ):
-    import numpy as np
-
     rng = random.Random(seed)
-    np_rng = np.random.default_rng(seed)
 
     row, col = edge_index.cpu().numpy()
     adj = [[] for _ in range(num_nodes)]
@@ -107,11 +118,11 @@ def train_lightweight_node2vec(
 
         pos_rw, neg_rw = [], []
         for src, ctx in generate_walks():
-            pos_rw.append([src] * len(ctx))
-            pos_rw.append(ctx)
-            for _ in range(num_negative_samples):
-                neg_node = rng.randint(0, num_nodes - 1)
-                neg_rw.append([src, neg_node])
+            for dst in ctx[1:]:
+                pos_rw.append([src, dst])
+                for _ in range(num_negative_samples):
+                    neg_node = rng.randint(0, num_nodes - 1)
+                    neg_rw.append([src, neg_node])
 
             if len(pos_rw) >= batch_size:
                 pos_rw_t = torch.tensor(pos_rw, dtype=torch.long, device=device)
@@ -122,17 +133,31 @@ def train_lightweight_node2vec(
                 loss.backward()
                 optimizer.step()
 
-                total_loss += float(loss)
+                total_loss += float(loss.detach())
                 n += 1
                 pos_rw, neg_rw = [], []
 
+        if pos_rw:
+            pos_rw_t = torch.tensor(pos_rw, dtype=torch.long, device=device)
+            neg_rw_t = torch.tensor(neg_rw, dtype=torch.long, device=device)
+
+            optimizer.zero_grad()
+            loss = model.loss(pos_rw_t, neg_rw_t)
+            loss.backward()
+            optimizer.step()
+
+            total_loss += float(loss.detach())
+            n += 1
+
         last_epoch = epoch
+        avg = total_loss / max(n, 1)
+        if epoch_callback is not None:
+            epoch_callback(epoch, avg, model)
         if epoch % 20 == 0 or epoch == epochs - 1:
-            avg = total_loss / max(n, 1)
             print(f"node2vec(light) epoch {epoch:04d} loss={avg:.4f}")
 
     model.eval()
     with torch.inference_mode():
-        z = model.embedding.weight.weight.data
+        z = model.embedding.weight.data
 
     return model, z, last_epoch

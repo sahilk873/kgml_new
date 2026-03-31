@@ -5,8 +5,15 @@ import torch
 
 from kgml_new.config import TrainConfig
 from kgml_new.data.graph import networkx_to_data
+from kgml_new.embeddings.semantic import build_relation_tensor
 from kgml_new.models.baseline_sage import BaselineGraphSAGE
-from kgml_new.training.link_unsupervised import train_unsupervised
+from kgml_new.models.edge_aware_sage import EdgeAwareGraphSAGE
+from kgml_new.training.link_unsupervised import (
+    create_train_val_split,
+    train_unsupervised,
+    train_unsupervised_batched,
+    train_unsupervised_fullgraph,
+)
 
 
 def test_train_unsupervised_runs():
@@ -29,3 +36,129 @@ def test_train_unsupervised_runs():
         device=torch.device("cpu"),
         edge_aware=False,
     )
+
+
+def _toy_graph():
+    g = nx.Graph()
+    g.add_edge("a", "b", relationship="T")
+    g.add_edge("b", "c", relationship="N")
+    g.add_edge("c", "a", relationship="T")
+    g.add_edge("c", "d", relationship="X")
+    return g
+
+
+def test_create_train_val_split_shapes():
+    data, _ = networkx_to_data(_toy_graph(), in_dim=16, seed=0)
+    mask = data.edge_index[0] < data.edge_index[1]
+    pos = data.edge_index[:, mask]
+
+    train_pos, val_pos, val_neg = create_train_val_split(pos, val_ratio=0.5, seed=0)
+
+    assert train_pos.shape[0] == 2
+    assert val_pos.shape[0] == 2
+    assert val_neg.shape[0] == 2
+    assert train_pos.shape[1] + val_pos.shape[1] == pos.shape[1]
+    assert val_neg.shape[1] == val_pos.shape[1]
+
+
+def test_train_unsupervised_fullgraph_with_validation_smoke(tmp_path):
+    data, _ = networkx_to_data(_toy_graph(), in_dim=16, seed=0)
+    mask = data.edge_index[0] < data.edge_index[1]
+    pos = data.edge_index[:, mask]
+    train_pos, val_pos, val_neg = create_train_val_split(pos, val_ratio=0.25, seed=0)
+
+    cfg = TrainConfig(epochs=2, batch_size=8, neg_samples=2, learning_rate=0.05)
+    model = BaselineGraphSAGE(16, 8, 16, num_layers=2)
+    history_path = tmp_path / "fullgraph_history.pkl"
+
+    _, last_epoch, history = train_unsupervised_fullgraph(
+        model,
+        data,
+        train_pos,
+        cfg,
+        device=torch.device("cpu"),
+        edge_aware=False,
+        val_pos_edge_index=val_pos,
+        val_neg_edge_index=val_neg,
+        history_path=history_path,
+    )
+
+    assert last_epoch == 1
+    assert history.epoch == [0, 1]
+    assert len(history.train_loss) == 2
+    assert len(history.val_auc) == 2
+    assert len(history.val_ap) == 2
+    assert history_path.exists()
+
+
+def test_train_unsupervised_edge_aware_with_validation_smoke():
+    data, relation_lookup = networkx_to_data(_toy_graph(), in_dim=16, seed=0)
+    mask = data.edge_index[0] < data.edge_index[1]
+    pos = data.edge_index[:, mask]
+    train_pos, val_pos, val_neg = create_train_val_split(pos, val_ratio=0.25, seed=0)
+
+    edge_dim = 8
+    torch.manual_seed(0)
+    rel_emb = {k: torch.randn(edge_dim) * 0.1 for k in relation_lookup}
+    relation_table = build_relation_tensor(
+        rel_emb, relation_lookup, edge_dim, torch.device("cpu")
+    )
+
+    cfg = TrainConfig(
+        in_dim=16,
+        edge_dim=edge_dim,
+        hidden_dim=8,
+        out_dim=16,
+        epochs=2,
+        batch_size=8,
+        neg_samples=2,
+        learning_rate=0.05,
+    )
+    model = EdgeAwareGraphSAGE(
+        16, edge_dim, 8, 16, relation_table=relation_table, num_layers=2, concat=True
+    )
+
+    _, last_epoch, history = train_unsupervised_fullgraph(
+        model,
+        data,
+        train_pos,
+        cfg,
+        device=torch.device("cpu"),
+        edge_aware=True,
+        val_pos_edge_index=val_pos,
+        val_neg_edge_index=val_neg,
+    )
+
+    assert last_epoch == 1
+    assert len(history.val_auc) == 2
+
+
+def test_train_unsupervised_batched_with_validation_smoke():
+    data, _ = networkx_to_data(_toy_graph(), in_dim=16, seed=0)
+    mask = data.edge_index[0] < data.edge_index[1]
+    pos = data.edge_index[:, mask]
+    train_pos, val_pos, val_neg = create_train_val_split(pos, val_ratio=0.25, seed=0)
+
+    cfg = TrainConfig(
+        epochs=1,
+        batch_size=2,
+        neg_samples=1,
+        learning_rate=0.05,
+        num_neighbors=[2, 2],
+    )
+    model = BaselineGraphSAGE(16, 8, 16, num_layers=2)
+
+    _, last_epoch, history = train_unsupervised_batched(
+        model,
+        data,
+        train_pos,
+        cfg,
+        device=torch.device("cpu"),
+        edge_aware=False,
+        val_pos_edge_index=val_pos,
+        val_neg_edge_index=val_neg,
+    )
+
+    assert last_epoch == 0
+    assert history.epoch == [0]
+    assert len(history.train_loss) == 1
