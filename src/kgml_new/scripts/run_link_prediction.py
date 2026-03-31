@@ -8,6 +8,7 @@ import networkx as nx
 import torch
 
 from kgml_new.config import TrainConfig
+from kgml_new.runtime import resolve_device, seed_everything, validate_positive
 from kgml_new.data.graph import networkx_to_data
 from kgml_new.embeddings.semantic import (
     build_relation_tensor,
@@ -57,19 +58,45 @@ def main() -> None:
         "--cache", type=Path, default=None, help="Pickle cache for relation embeddings"
     )
     p.add_argument("--epochs", type=int, default=20)
+    p.add_argument("--batch-size", type=int, default=None)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Torch device string, e.g. cuda, cuda:0, cpu",
+    )
+    p.add_argument(
+        "--deterministic",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable deterministic CuDNN behavior for reproducibility",
+    )
+    p.add_argument(
+        "--use-amp",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override mixed precision behavior",
+    )
     p.add_argument(
         "--out", type=Path, default=None, help="Save node embeddings .pt path"
     )
     args = p.parse_args()
 
-    torch.manual_seed(args.seed)
+    validate_positive("epochs", args.epochs)
+    if args.batch_size is not None:
+        validate_positive("batch_size", args.batch_size)
+    seed_everything(args.seed, deterministic=args.deterministic)
     cfg = TrainConfig(epochs=args.epochs, seed=args.seed)
+    if args.batch_size is not None:
+        cfg.batch_size = args.batch_size
+    if args.use_amp is not None:
+        cfg.use_amp = args.use_amp
 
     g = _load_graph(args.graph)
     data, relation_lookup = networkx_to_data(g, in_dim=cfg.in_dim, seed=cfg.seed)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = resolve_device(args.device)
     mask = data.edge_index[0] < data.edge_index[1]
     pos_edge_index = data.edge_index[:, mask].clone()
     pos_edge_attr = data.edge_attr[mask].clone() if hasattr(data, "edge_attr") else None

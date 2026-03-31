@@ -81,6 +81,8 @@ def train_node2vec_embeddings(
             learning_rate=cfg.learning_rate,
             seed=cfg.seed,
             device=device,
+            use_amp=cfg.use_amp,
+            grad_clip_norm=cfg.grad_clip_norm,
             checkpoint_path=checkpoint_path,
             resume=resume,
             save_every_epochs=save_every_epochs,
@@ -88,6 +90,7 @@ def train_node2vec_embeddings(
         return model, z, last_ep
 
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate)
+    scaler = torch.cuda.amp.GradScaler() if (device.type == "cuda" and cfg.use_amp) else None
     ckpt_path = checkpoint_path
     start_epoch = 0
     if resume and ckpt_path and ckpt_path.is_file():
@@ -107,10 +110,22 @@ def train_node2vec_embeddings(
             total_loss = 0.0
             n = 0
             for pos_rw, neg_rw in loader:
-                optimizer.zero_grad()
-                loss = model.loss(pos_rw.to(device), neg_rw.to(device))
-                loss.backward()
-                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                with torch.autocast(
+                    device_type="cuda" if device.type == "cuda" else "cpu",
+                    enabled=scaler is not None,
+                ):
+                    loss = model.loss(pos_rw.to(device), neg_rw.to(device))
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip_norm)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip_norm)
+                    optimizer.step()
                 total_loss += float(loss.detach())
                 n += 1
             last_epoch = epoch
@@ -144,6 +159,11 @@ def train_node2vec_embeddings_with_validation(
     val_pos_edge_index: Tensor | None = None,
     val_neg_edge_index: Tensor | None = None,
 ) -> tuple[object, Tensor, int, TrainingHistory]:
+    """Train Node2Vec embeddings with proper GPU optimization and memory management.
+    
+    FIXED: Added mixed precision training, gradient clipping, learning rate scheduling,
+    and memory cleanup between batches.
+    """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -158,6 +178,8 @@ def train_node2vec_embeddings_with_validation(
 
     history = TrainingHistory(edge_aware=False, num_neighbors=None)
     history.config = _node2vec_history_config(cfg)
+    
+    scaler = torch.cuda.amp.GradScaler() if (device.type == "cuda" and cfg.use_amp) else None
 
     def record_epoch(epoch: int, avg_loss: float, z_eval: Tensor) -> None:
         history.epoch.append(epoch)
@@ -206,6 +228,8 @@ def train_node2vec_embeddings_with_validation(
             learning_rate=cfg.learning_rate,
             seed=cfg.seed,
             device=device,
+            use_amp=cfg.use_amp,
+            grad_clip_norm=cfg.grad_clip_norm,
             checkpoint_path=checkpoint_path,
             resume=resume,
             save_every_epochs=save_every_epochs,
@@ -214,6 +238,9 @@ def train_node2vec_embeddings_with_validation(
         return model, z, last_epoch, history
 
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="max", factor=0.5, patience=10, min_lr=1e-6
+    )
     ckpt_path = checkpoint_path
     start_epoch = 0
     if resume and ckpt_path and ckpt_path.is_file():
@@ -225,6 +252,8 @@ def train_node2vec_embeddings_with_validation(
         print(f"Resuming PyG Node2Vec from epoch {start_epoch}")
 
     last_epoch = start_epoch - 1
+    best_val_auc = float("-inf")
+    patience_counter = 0
     if start_epoch >= cfg.epochs:
         print(f"PyG Node2Vec already at epoch >= {cfg.epochs}; skipping training loop.")
     else:
@@ -233,18 +262,41 @@ def train_node2vec_embeddings_with_validation(
             total_loss = 0.0
             n = 0
             for pos_rw, neg_rw in loader:
-                optimizer.zero_grad()
-                loss = model.loss(pos_rw.to(device), neg_rw.to(device))
-                loss.backward()
-                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                
+                with torch.autocast(device_type="cuda" if device.type == "cuda" else "cpu", enabled=scaler is not None):
+                    loss = model.loss(pos_rw.to(device), neg_rw.to(device))
+                
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip_norm)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip_norm)
+                    optimizer.step()
+                
                 total_loss += float(loss.detach())
                 n += 1
+                
+                del loss, pos_rw, neg_rw
+            
             last_epoch = epoch
             avg = total_loss / max(n, 1)
 
             with torch.inference_mode():
                 z_eval = model()
             record_epoch(epoch, avg, z_eval)
+            
+            if history.val_auc:
+                scheduler.step(history.val_auc[-1])
+                if history.val_auc[-1] > best_val_auc:
+                    best_val_auc = history.val_auc[-1]
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
 
             if epoch % 20 == 0 or epoch == cfg.epochs - 1:
                 val_str = ""
@@ -253,7 +305,8 @@ def train_node2vec_embeddings_with_validation(
                         f" val_auc={history.val_auc[-1]:.4f}"
                         f" val_ap={history.val_ap[-1]:.4f}"
                     )
-                print(f"node2vec(pyg) epoch {epoch:04d} loss={avg:.4f}{val_str}")
+                lr_str = f" lr={optimizer.param_groups[0]['lr']:.2e}"
+                print(f"node2vec(pyg) epoch {epoch:04d} loss={avg:.4f}{val_str}{lr_str}")
 
             if ckpt_path is not None and save_every_epochs > 0:
                 if (epoch + 1) % save_every_epochs == 0 or epoch == cfg.epochs - 1:
@@ -264,6 +317,12 @@ def train_node2vec_embeddings_with_validation(
                         optimizer_state_dict=optimizer.state_dict(),
                         extra={"kind": "pyg_node2vec"},
                     )
+            if patience_counter >= cfg.early_stop_patience:
+                print(
+                    f"Early stopping at epoch {epoch} "
+                    f"(no improvement for {cfg.early_stop_patience} epochs)"
+                )
+                break
 
     model.eval()
     with torch.inference_mode():

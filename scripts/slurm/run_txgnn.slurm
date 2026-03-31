@@ -11,9 +11,13 @@
 set -euo pipefail
 
 cd /nas/longleaf/home/sahilk/kgml_new
+mkdir -p logs/slurm results/slurm
+export PYTHONPATH=src
 
 .venv/bin/python -m kgml_new.scripts.run_txgnn \
   --csv kg.csv \
   --relation indication \
+  --device cuda \
+  --batch-size 1024 \
   --epochs 20 \
   --output results/slurm/txgnn-${SLURM_JOB_ID}.json

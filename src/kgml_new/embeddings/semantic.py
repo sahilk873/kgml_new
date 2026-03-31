@@ -27,12 +27,14 @@ def relation_embeddings_from_graph(
     edge_dim: int = 32,
     cache_path: Path | None = None,
     use_openai: bool = True,
+    strict_openai: bool = False,
 ) -> dict[str, torch.Tensor]:
     """
     Get relation embeddings from graph edges using OpenAI embeddings.
 
     If cache_path is provided, loads from cache or saves to cache.
     If use_openai is False, returns random embeddings (for ablation).
+    If strict_openai is True and OpenAI embedding setup fails, raises RuntimeError.
     """
     if cache_path and cache_path.exists():
         with open(cache_path, "rb") as f:
@@ -54,9 +56,17 @@ def relation_embeddings_from_graph(
             for rel, emb in zip(rel_types, embeddings):
                 rel_emb[rel] = torch.tensor(emb[:edge_dim], dtype=torch.float32)
         except ModuleNotFoundError as e:
+            if strict_openai:
+                raise RuntimeError(
+                    "OpenAI dependency missing while strict_openai=True"
+                ) from e
             print(f"OpenAI dependency missing ({e}); using random embeddings")
             use_openai = False
         except Exception as e:
+            if strict_openai:
+                raise RuntimeError(
+                    "OpenAI embedding failed while strict_openai=True"
+                ) from e
             print(f"OpenAI embedding failed: {e}, using random embeddings")
             use_openai = False
 

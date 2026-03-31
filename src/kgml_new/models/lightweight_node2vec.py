@@ -65,6 +65,8 @@ def train_lightweight_node2vec(
     learning_rate: float = 0.01,
     seed: int = 42,
     device: torch.device = torch.device("cpu"),
+    use_amp: bool = True,
+    grad_clip_norm: float = 1.0,
     checkpoint_path=None,
     resume=False,
     save_every_epochs: int = 1,
@@ -117,6 +119,8 @@ def train_lightweight_node2vec(
                     yield walk[i], context
 
     last_epoch = -1
+    scaler = torch.cuda.amp.GradScaler() if (device.type == "cuda" and use_amp) else None
+    
     for epoch in range(epochs):
         model.train()
         total_loss = 0
@@ -134,26 +138,52 @@ def train_lightweight_node2vec(
                 pos_rw_t = torch.tensor(pos_rw, dtype=torch.long, device=device)
                 neg_rw_t = torch.tensor(neg_rw, dtype=torch.long, device=device)
 
-                optimizer.zero_grad()
-                loss = model.loss(pos_rw_t, neg_rw_t)
-                loss.backward()
-                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                
+                with torch.autocast(device_type="cuda" if device.type == "cuda" else "cpu", enabled=scaler is not None):
+                    loss = model.loss(pos_rw_t, neg_rw_t)
+                
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
+                    optimizer.step()
 
                 total_loss += float(loss.detach())
                 n += 1
                 pos_rw, neg_rw = [], []
+                
+                del pos_rw_t, neg_rw_t, loss
 
         if pos_rw:
             pos_rw_t = torch.tensor(pos_rw, dtype=torch.long, device=device)
             neg_rw_t = torch.tensor(neg_rw, dtype=torch.long, device=device)
 
-            optimizer.zero_grad()
-            loss = model.loss(pos_rw_t, neg_rw_t)
-            loss.backward()
-            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            
+            with torch.autocast(device_type="cuda" if device.type == "cuda" else "cpu", enabled=scaler is not None):
+                loss = model.loss(pos_rw_t, neg_rw_t)
+            
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
+                optimizer.step()
 
             total_loss += float(loss.detach())
             n += 1
+            
+            del pos_rw_t, neg_rw_t, loss
 
         last_epoch = epoch
         avg = total_loss / max(n, 1)

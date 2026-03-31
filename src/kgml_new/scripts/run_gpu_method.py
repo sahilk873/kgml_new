@@ -7,15 +7,17 @@ from pathlib import Path
 import torch
 
 from kgml_new.config import LinkMLPConfig, Node2VecConfig, TrainConfig
+from kgml_new.runtime import resolve_device, seed_everything, validate_positive
 from kgml_new.data.graph import networkx_to_data
 from kgml_new.data.primekg import load_primekg_csv
-from kgml_new.embeddings.semantic import build_relation_tensor
+from kgml_new.embeddings.semantic import build_relation_tensor, relation_embeddings_from_graph
 from kgml_new.models.baseline_gcn import BaselineGCN
 from kgml_new.models.baseline_sage import BaselineGraphSAGE
 from kgml_new.models.edge_aware_sage import EdgeAwareGraphSAGE
-from kgml_new.training.eval import link_prediction_dot_product, link_prediction_mlp_torch
+from kgml_new.training.eval import link_prediction_dot_product, link_prediction_mlp_torch, link_prediction_dot_product_with_ci, link_prediction_mlp_with_ci
 from kgml_new.training.link_unsupervised import (
     compute_node_embeddings,
+    train_unsupervised_batched,
     train_unsupervised_fullgraph,
 )
 from kgml_new.training.node2vec_train import (
@@ -37,7 +39,44 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--csv", type=Path, default=Path("kg.csv"))
     parser.add_argument("--max-edges", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Torch device string, e.g. cuda, cuda:0, cpu",
+    )
+    parser.add_argument(
+        "--deterministic",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable deterministic CuDNN behavior for reproducibility",
+    )
+    parser.add_argument(
+        "--use-amp",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override mixed precision behavior for all methods",
+    )
+    parser.add_argument(
+        "--semantic",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="For edge_aware_sage: use semantic relation embeddings via OpenAI",
+    )
+    parser.add_argument(
+        "--require-semantic",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="For edge_aware_sage: fail if semantic embeddings cannot be produced",
+    )
+    parser.add_argument(
+        "--relation-cache",
+        type=Path,
+        default=None,
+        help="Optional cache path for relation embeddings (edge_aware_sage)",
+    )
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
@@ -83,11 +122,21 @@ def history_dict(history) -> dict:
     }
 
 
+def _format_metrics_with_ci(metrics: dict) -> str:
+    """Format metrics with CI for display."""
+    auc_str = f"AUC: {metrics['roc_auc']:.4f} [{metrics.get('roc_auc_ci_lower', 'N/A')}, {metrics.get('roc_auc_ci_upper', 'N/A')}]"
+    ap_str = f"AP: {metrics['average_precision']:.4f} [{metrics.get('ap_ci_lower', 'N/A')}, {metrics.get('ap_ci_upper', 'N/A')}]"
+    return f"{auc_str}, {ap_str}"
+
+
 def main() -> None:
     args = parse_args()
-    torch.manual_seed(args.seed)
+    validate_positive("epochs", args.epochs)
+    if args.batch_size is not None:
+        validate_positive("batch_size", args.batch_size)
+    seed_everything(args.seed, deterministic=args.deterministic)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = resolve_device(args.device)
     graph, train_data, relation_lookup, split = build_dataset(
         args.csv, args.max_edges, args.seed
     )
@@ -113,10 +162,14 @@ def main() -> None:
 
     if args.method == "baseline_sage":
         cfg = TrainConfig(epochs=args.epochs, seed=args.seed)
+        if args.batch_size is not None:
+            cfg.batch_size = args.batch_size
+        if args.use_amp is not None:
+            cfg.use_amp = args.use_amp
         model = BaselineGraphSAGE(
             cfg.in_dim, cfg.hidden_dim, cfg.out_dim, num_layers=cfg.num_layers, dropout=cfg.dropout
         )
-        model, last_epoch, history = train_unsupervised_fullgraph(
+        model, last_epoch, history = train_unsupervised_batched(
             model,
             train_data,
             train_pos,
@@ -127,17 +180,22 @@ def main() -> None:
             val_neg_edge_index=val_neg,
         )
         z = compute_node_embeddings(model, train_data, device, edge_aware=False)
-        val_metrics = link_prediction_dot_product(z, val_pos, val_neg)
-        test_metrics = link_prediction_dot_product(z, test_pos, test_neg)
+        val_metrics = link_prediction_dot_product_with_ci(z, val_pos, val_neg)
+        test_metrics = link_prediction_dot_product_with_ci(z, test_pos, test_neg)
         output["embedding_shape"] = list(z.shape)
         output["last_epoch"] = last_epoch
         output["history"] = history_dict(history)
         output["val_metrics"] = val_metrics
         output["test_metrics"] = test_metrics
         output["metrics"] = test_metrics
+        print(f"Test set: {_format_metrics_with_ci(test_metrics)}")
 
     elif args.method == "baseline_gcn":
         cfg = TrainConfig(epochs=args.epochs, seed=args.seed)
+        if args.batch_size is not None:
+            cfg.batch_size = args.batch_size
+        if args.use_amp is not None:
+            cfg.use_amp = args.use_amp
         model = BaselineGCN(
             cfg.in_dim, cfg.hidden_dim, cfg.out_dim, num_layers=cfg.num_layers, dropout=cfg.dropout
         )
@@ -152,19 +210,31 @@ def main() -> None:
             val_neg_edge_index=val_neg,
         )
         z = compute_node_embeddings(model, train_data, device, edge_aware=False)
-        val_metrics = link_prediction_dot_product(z, val_pos, val_neg)
-        test_metrics = link_prediction_dot_product(z, test_pos, test_neg)
+        val_metrics = link_prediction_dot_product_with_ci(z, val_pos, val_neg)
+        test_metrics = link_prediction_dot_product_with_ci(z, test_pos, test_neg)
         output["embedding_shape"] = list(z.shape)
         output["last_epoch"] = last_epoch
         output["history"] = history_dict(history)
         output["val_metrics"] = val_metrics
         output["test_metrics"] = test_metrics
         output["metrics"] = test_metrics
+        print(f"Test set: {_format_metrics_with_ci(test_metrics)}")
 
     elif args.method == "edge_aware_sage":
         cfg = TrainConfig(epochs=args.epochs, seed=args.seed)
+        if args.batch_size is not None:
+            cfg.batch_size = args.batch_size
+        if args.use_amp is not None:
+            cfg.use_amp = args.use_amp
         edge_dim = cfg.edge_dim
-        rel_emb = {key: torch.randn(edge_dim) * 0.1 for key in relation_lookup}
+        rel_emb = relation_embeddings_from_graph(
+            graph,
+            edge_dim=edge_dim,
+            cache_path=args.relation_cache,
+            use_openai=args.semantic,
+            strict_openai=args.require_semantic,
+        )
+        rel_source = "semantic_openai" if args.semantic else "random_ablation"
         relation_table = build_relation_tensor(rel_emb, relation_lookup, edge_dim, device)
         model = EdgeAwareGraphSAGE(
             cfg.in_dim,
@@ -176,7 +246,7 @@ def main() -> None:
             dropout=cfg.dropout,
             concat=cfg.concat,
         )
-        model, last_epoch, history = train_unsupervised_fullgraph(
+        model, last_epoch, history = train_unsupervised_batched(
             model,
             train_data,
             train_pos,
@@ -187,17 +257,28 @@ def main() -> None:
             val_neg_edge_index=val_neg,
         )
         z = compute_node_embeddings(model, train_data, device, edge_aware=True)
-        val_metrics = link_prediction_dot_product(z, val_pos, val_neg)
-        test_metrics = link_prediction_dot_product(z, test_pos, test_neg)
+        val_metrics = link_prediction_dot_product_with_ci(z, val_pos, val_neg)
+        test_metrics = link_prediction_dot_product_with_ci(z, test_pos, test_neg)
         output["embedding_shape"] = list(z.shape)
         output["last_epoch"] = last_epoch
         output["history"] = history_dict(history)
+        output["relation_embedding_source"] = rel_source
+        output["semantic_enabled"] = bool(args.semantic)
+        output["semantic_required"] = bool(args.require_semantic)
+        output["relation_embedding_cache"] = (
+            str(args.relation_cache) if args.relation_cache is not None else None
+        )
         output["val_metrics"] = val_metrics
         output["test_metrics"] = test_metrics
         output["metrics"] = test_metrics
+        print(f"Test set: {_format_metrics_with_ci(test_metrics)}")
 
     elif args.method == "node2vec":
-        cfg = Node2VecConfig(epochs=args.epochs, seed=args.seed, embedding_dim=64)
+        cfg = Node2VecConfig(epochs=args.epochs, seed=args.seed, embedding_dim=256)
+        if args.batch_size is not None:
+            cfg.batch_size = args.batch_size
+        if args.use_amp is not None:
+            cfg.use_amp = args.use_amp
         _, z, last_epoch, history = train_node2vec_embeddings_with_validation(
             train_data,
             cfg,
@@ -208,12 +289,19 @@ def main() -> None:
         output["embedding_shape"] = list(z.shape)
         output["last_epoch"] = last_epoch
         output["history"] = history_dict(history)
-        output["val_metrics"] = link_prediction_dot_product(z, val_pos, val_neg)
-        output["test_metrics"] = link_prediction_dot_product(z, test_pos, test_neg)
-        output["metrics"] = output["test_metrics"]
+        val_metrics = link_prediction_dot_product_with_ci(z, val_pos, val_neg)
+        test_metrics = link_prediction_dot_product_with_ci(z, test_pos, test_neg)
+        output["val_metrics"] = val_metrics
+        output["test_metrics"] = test_metrics
+        output["metrics"] = test_metrics
+        print(f"Test set: {_format_metrics_with_ci(test_metrics)}")
 
     else:
         base_cfg = TrainConfig(epochs=args.epochs, seed=args.seed)
+        if args.batch_size is not None:
+            base_cfg.batch_size = args.batch_size
+        if args.use_amp is not None:
+            base_cfg.use_amp = args.use_amp
         base_model = BaselineGraphSAGE(
             base_cfg.in_dim,
             base_cfg.hidden_dim,
@@ -221,7 +309,7 @@ def main() -> None:
             num_layers=base_cfg.num_layers,
             dropout=base_cfg.dropout,
         )
-        base_model, base_last_epoch, base_history = train_unsupervised_fullgraph(
+        base_model, base_last_epoch, base_history = train_unsupervised_batched(
             base_model,
             train_data,
             train_pos,
@@ -233,6 +321,10 @@ def main() -> None:
         )
         z = compute_node_embeddings(base_model, train_data, device, edge_aware=False).detach()
         mlp_cfg = LinkMLPConfig(epochs=args.epochs, seed=args.seed)
+        if args.batch_size is not None:
+            mlp_cfg.batch_size = args.batch_size
+        if args.use_amp is not None:
+            mlp_cfg.use_amp = args.use_amp
         mlp, last_epoch, history = train_link_mlp_with_validation(
             z,
             train_pos,
@@ -246,9 +338,12 @@ def main() -> None:
         output["history"] = history_dict(history)
         output["base_embedding_history"] = history_dict(base_history)
         output["base_last_epoch"] = base_last_epoch
-        output["val_metrics"] = link_prediction_mlp_torch(mlp, val_pos, val_neg, z)
-        output["test_metrics"] = link_prediction_mlp_torch(mlp, test_pos, test_neg, z)
-        output["metrics"] = output["test_metrics"]
+        val_metrics = link_prediction_mlp_with_ci(mlp, val_pos, val_neg, z)
+        test_metrics = link_prediction_mlp_with_ci(mlp, test_pos, test_neg, z)
+        output["val_metrics"] = val_metrics
+        output["test_metrics"] = test_metrics
+        output["metrics"] = test_metrics
+        print(f"Test set: {_format_metrics_with_ci(test_metrics)}")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(output, indent=2))
