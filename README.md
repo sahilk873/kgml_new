@@ -6,6 +6,7 @@ Standalone **PyTorch Geometric** implementation of:
 - **Edge-aware semantic GraphSAGE**: neighbor messages use `concat(node_features, relation_embedding)` per edge, matching the kgml `TensorizedEdgeAwareMeanAggregator` design
 - **BaselineGCN** for comparison
 - **Node2Vec** embeddings
+- **TxGNN-style hetero model**: relation-aware heterogeneous GNN + DistMult decoder + disease prototype augmentation
 
 No Kedro. Intended for graphs built from **PrimeKG** or any **NetworkX** graph with relation attributes on edges.
 
@@ -24,6 +25,7 @@ Set `OPENAI_API_KEY` when using `--semantic` / OpenAI path.
 ```bash
 python -m kgml_new.scripts.run_link_prediction --graph /path/to/graph.pkl --model sage --epochs 20 --out emb.pt
 python -m kgml_new.scripts.run_link_prediction --graph /path/to/graph.pkl --model edge_sage --no-semantic --epochs 20
+python -m kgml_new.scripts.run_txgnn --csv kg.csv --max-edges 10000 --relation indication --epochs 20 --output txgnn.json
 ```
 
 ## HPC Setup

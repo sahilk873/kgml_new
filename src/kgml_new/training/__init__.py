@@ -15,6 +15,7 @@ from kgml_new.training.train_link_mlp import (
     train_link_mlp,
     train_link_mlp_with_validation,
 )
+from kgml_new.training.txgnn_train import TxGNNTrainResult, evaluate_relation, train_txgnn
 
 __all__ = [
     "compute_node_embeddings",
@@ -29,4 +30,7 @@ __all__ = [
     "train_unsupervised",
     "train_unsupervised_batched",
     "train_unsupervised_fullgraph",
+    "train_txgnn",
+    "evaluate_relation",
+    "TxGNNTrainResult",
 ]

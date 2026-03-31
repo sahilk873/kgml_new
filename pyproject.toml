@@ -23,6 +23,7 @@ dev = ["pytest>=7.0"]
 
 [project.scripts]
 kgml-new-link-pred = "kgml_new.scripts.run_link_prediction:main"
+kgml-new-txgnn = "kgml_new.scripts.run_txgnn:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
