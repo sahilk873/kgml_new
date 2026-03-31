@@ -78,6 +78,12 @@ def train_lightweight_node2vec(
         adj[i].append(j)
         adj[j].append(i)
 
+    neighbors = [set(neighbors) for neighbors in adj]
+    non_neighbors = [
+        [j for j in range(num_nodes) if j != i and j not in neighbors[i]]
+        for i in range(num_nodes)
+    ]
+
     model = Node2VecEmbedding(
         num_nodes=num_nodes,
         embedding_dim=embedding_dim,
@@ -121,7 +127,7 @@ def train_lightweight_node2vec(
             for dst in ctx[1:]:
                 pos_rw.append([src, dst])
                 for _ in range(num_negative_samples):
-                    neg_node = rng.randint(0, num_nodes - 1)
+                    neg_node = rng.choice(non_neighbors[src])
                     neg_rw.append([src, neg_node])
 
             if len(pos_rw) >= batch_size:
