@@ -38,10 +38,12 @@ class EdgeAwareGraphSAGE(nn.Module):
         num_layers: int = 2,
         dropout: float = 0.0,
         concat: bool = True,
+        normalize_output: bool = True,
     ) -> None:
         super().__init__()
         self.dropout = dropout
         self.concat = concat
+        self.normalize_output = normalize_output
         self.relation_table = nn.Parameter(relation_table, requires_grad=False)
 
         self.layers = nn.ModuleList()
@@ -65,4 +67,6 @@ class EdgeAwareGraphSAGE(nn.Module):
                 h = F.dropout(h, p=self.dropout, training=self.training)
 
         h = self.post(h, edge_index)
-        return F.normalize(h, p=2, dim=-1)
+        if self.normalize_output:
+            h = F.normalize(h, p=2, dim=-1)
+        return h

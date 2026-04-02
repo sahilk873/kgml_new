@@ -32,7 +32,10 @@ def train_link_mlp(
 
     torch.manual_seed(config.seed)
     model = LinkPredictionMLP(
-        z.size(1), hidden_dims=config.hidden_dims, dropout=config.dropout
+        z.size(1),
+        hidden_dims=config.hidden_dims,
+        dropout=config.dropout,
+        feature_mode=config.feature_mode,
     ).to(device)
     z = z.to(device)
     pos_edge_index = pos_edge_index.to(device)
@@ -140,7 +143,10 @@ def train_link_mlp_with_validation(
 
     torch.manual_seed(config.seed)
     model = LinkPredictionMLP(
-        z.size(1), hidden_dims=config.hidden_dims, dropout=config.dropout
+        z.size(1),
+        hidden_dims=config.hidden_dims,
+        dropout=config.dropout,
+        feature_mode=config.feature_mode,
     ).to(device)
     z = z.to(device)
     pos_edge_index = pos_edge_index.to(device)

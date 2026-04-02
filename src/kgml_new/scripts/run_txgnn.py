@@ -6,92 +6,104 @@ from pathlib import Path
 
 import torch
 
+from kgml_new.data.loaders import GraphCSVSpec, PRIMEKG_CSV_SPEC, load_graph_csv, load_pickled_graph
 from kgml_new.data.hetero import networkx_to_heterodata
-from kgml_new.data.primekg import load_primekg_csv
 from kgml_new.models.txgnn import TxGNN
-from kgml_new.runtime import resolve_device, seed_everything, validate_positive
 from kgml_new.training.splits import create_edge_split
 from kgml_new.training.txgnn_train import evaluate_relation, train_txgnn
 
 
-def _select_edge_type(
-    edge_types: list[tuple[str, str, str]],
-    requested_relation: str,
-) -> tuple[tuple[str, str, str], bool]:
-    requested = ("drug", requested_relation, "disease")
-    if requested in edge_types:
-        return requested, False
-
-    # Prefer a forward (non-reverse) relation if available.
-    forward = [et for et in edge_types if not et[1].startswith("rev_")]
-    if forward:
-        return forward[0], True
-    if edge_types:
-        return edge_types[0], True
-    raise ValueError("No edge types available in hetero graph")
-
-
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train TxGNN-style hetero model on PrimeKG.")
-    parser.add_argument("--csv", type=Path, default=Path("kg.csv"))
+    parser = argparse.ArgumentParser(description="Train TxGNN-style hetero model on a typed KG.")
+    parser.add_argument("--input", "--csv", dest="input_path", type=Path, default=Path("kg.csv"))
+    parser.add_argument(
+        "--input-format",
+        choices=("auto", "csv", "pickle"),
+        default="auto",
+    )
     parser.add_argument("--max-edges", type=int, default=None)
+    parser.add_argument("--source-col", type=str, default=PRIMEKG_CSV_SPEC.source_col)
+    parser.add_argument("--target-col", type=str, default=PRIMEKG_CSV_SPEC.target_col)
+    parser.add_argument("--relation-col", type=str, default=PRIMEKG_CSV_SPEC.relation_col)
+    parser.add_argument("--source-type-col", type=str, default=PRIMEKG_CSV_SPEC.source_type_col)
+    parser.add_argument("--target-type-col", type=str, default=PRIMEKG_CSV_SPEC.target_type_col)
     parser.add_argument("--relation", type=str, default="indication")
+    parser.add_argument("--source-node-type", type=str, default=None)
+    parser.add_argument("--target-node-type", type=str, default=None)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--neg-samples", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--device",
-        type=str,
-        default=None,
-        help="Torch device string, e.g. cuda, cuda:0, cpu",
-    )
-    parser.add_argument(
-        "--deterministic",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Enable deterministic CuDNN behavior for reproducibility",
-    )
-    parser.add_argument(
-        "--use-amp",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Enable/disable automatic mixed precision on CUDA",
-    )
-    parser.add_argument("--grad-clip-norm", type=float, default=1.0)
-    parser.add_argument("--early-stop-patience", type=int, default=20)
+    parser.add_argument("--in-dim", type=int, default=64)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
+
+def _csv_spec_from_args(args: argparse.Namespace) -> GraphCSVSpec:
+    return GraphCSVSpec(
+        source_col=args.source_col,
+        target_col=args.target_col,
+        relation_col=args.relation_col,
+        source_type_col=args.source_type_col,
+        target_type_col=args.target_type_col,
+        source_id_col=PRIMEKG_CSV_SPEC.source_id_col,
+        target_id_col=PRIMEKG_CSV_SPEC.target_id_col,
+        node_type_attr=PRIMEKG_CSV_SPEC.node_type_attr,
+        relation_attr=PRIMEKG_CSV_SPEC.relation_attr,
+        default_node_type=PRIMEKG_CSV_SPEC.default_node_type,
+        edge_attr_cols=PRIMEKG_CSV_SPEC.edge_attr_cols,
+        directed=False,
+    )
+
+
+def _load_graph(args: argparse.Namespace):
+    input_format = args.input_format
+    if input_format == "auto":
+        suffix = args.input_path.suffix.lower()
+        input_format = "pickle" if suffix in {".pkl", ".pickle"} else "csv"
+    if input_format == "pickle":
+        return load_pickled_graph(args.input_path)
+    return load_graph_csv(args.input_path, spec=_csv_spec_from_args(args), max_edges=args.max_edges)
+
+
+def _resolve_target_edge_type(args: argparse.Namespace, edge_types: list[tuple[str, str, str]]):
+    if args.source_node_type and args.target_node_type:
+        edge_type = (args.source_node_type, args.relation, args.target_node_type)
+        if edge_type not in edge_types:
+            raise ValueError(f"Edge type {edge_type} not in hetero graph edge types: {edge_types}")
+        return edge_type
+
+    relation_matches = [edge_type for edge_type in edge_types if edge_type[1] == args.relation]
+    if not relation_matches:
+        raise ValueError(
+            f"No edge type found for relation '{args.relation}'. Available edge types: {edge_types}"
+        )
+    if len(relation_matches) > 1:
+        raise ValueError(
+            "Relation is ambiguous across multiple typed edges. "
+            "Pass --source-node-type and --target-node-type to disambiguate. "
+            f"Candidates: {relation_matches}"
+        )
+    return relation_matches[0]
+
 def main() -> None:
     args = parse_args()
-    validate_positive("epochs", args.epochs)
-    validate_positive("batch_size", args.batch_size)
-    validate_positive("neg_samples", args.neg_samples)
-    validate_positive("early_stop_patience", args.early_stop_patience)
-    if args.grad_clip_norm <= 0:
-        raise ValueError(f"grad_clip_norm must be > 0, got {args.grad_clip_norm}")
-    seed_everything(args.seed, deterministic=args.deterministic)
-    device = resolve_device(args.device)
+    torch.manual_seed(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    graph = load_primekg_csv(args.csv, max_edges=args.max_edges)
-    data = networkx_to_heterodata(graph, in_dim=64, seed=args.seed, add_reverse_edges=True)
-    edge_type, used_fallback_relation = _select_edge_type(list(data.edge_types), args.relation)
-    if used_fallback_relation:
-        print(
-            f"Requested relation '{args.relation}' not found; "
-            f"using available edge type {edge_type}."
-        )
-    src_type, relation_name, dst_type = edge_type
+    graph = _load_graph(args)
+    data = networkx_to_heterodata(graph, in_dim=args.in_dim, seed=args.seed, add_reverse_edges=True)
+    edge_type = _resolve_target_edge_type(args, list(data.edge_types))
 
     split = create_edge_split(
         data[edge_type].edge_index.cpu(),
-        num_src_nodes=int(data[src_type].num_nodes),
-        num_dst_nodes=int(data[dst_type].num_nodes),
+        num_src_nodes=int(data[edge_type[0]].num_nodes),
+        num_dst_nodes=int(data[edge_type[2]].num_nodes),
         val_ratio=0.1,
         test_ratio=0.1,
         seed=args.seed,
         undirected=False,
+        bipartite=edge_type[0] != edge_type[2],
     )
     train_pos = split.train_pos_edge_index
     val_pos = split.val_pos_edge_index
@@ -100,15 +112,15 @@ def main() -> None:
     test_neg = split.test_neg_edge_index
 
     data[edge_type].edge_index = train_pos
-    rev_edge_type = (dst_type, f"rev_{relation_name}", src_type)
+    rev_edge_type = (edge_type[2], f"rev_{edge_type[1]}", edge_type[0])
     if rev_edge_type in data.edge_types:
         data[rev_edge_type].edge_index = train_pos.flip(0)
 
     model = TxGNN(
         metadata=data.metadata(),
-        in_channels=64,
-        hidden_channels=64,
-        out_channels=64,
+        in_channels=args.in_dim,
+        hidden_channels=args.in_dim,
+        out_channels=args.in_dim,
         num_layers=2,
         dropout=0.1,
         use_prototypes=True,
@@ -123,9 +135,6 @@ def main() -> None:
         batch_size=args.batch_size,
         neg_samples=args.neg_samples,
         learning_rate=1e-3,
-        use_amp=args.use_amp,
-        grad_clip_norm=args.grad_clip_norm,
-        early_stop_patience=args.early_stop_patience,
         device=device,
     )
 
@@ -134,19 +143,15 @@ def main() -> None:
 
     output = {
         "method": "txgnn",
-        "relation": relation_name,
-        "requested_relation": args.relation,
-        "edge_type": [src_type, relation_name, dst_type],
-        "used_fallback_relation": used_fallback_relation,
+        "relation": edge_type[1],
+        "edge_type": list(edge_type),
+        "input_path": str(args.input_path),
+        "input_format": args.input_format,
         "device": str(device),
-        "cuda_available": torch.cuda.is_available(),
-        "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "num_nodes": {k: int(v.num_nodes) for k, v in data.node_items()},
         "num_train_edges": int(train_pos.size(1)),
         "num_val_edges": int(val_pos.size(1)),
         "num_test_edges": int(test_pos.size(1)),
-        "epochs": args.epochs,
-        "batch_size": args.batch_size,
         "evaluation_protocol": "train-only relation graph with reverse edges updated; held-out val/test positives; true sampled bipartite non-edge negatives",
         "history": {
             "train_loss": history.train_loss,
@@ -157,8 +162,6 @@ def main() -> None:
         "test_metrics": {"roc_auc": float(test_auc), "average_precision": float(test_ap)},
         "final_metrics": {"roc_auc": float(test_auc), "average_precision": float(test_ap)},
     }
-    print(f"Validation: AUC={val_auc:.4f}, AP={val_ap:.4f}")
-    print(f"Test set: AUC={test_auc:.4f}, AP={test_ap:.4f}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(output, indent=2))
     print(json.dumps(output, indent=2))

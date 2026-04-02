@@ -6,13 +6,14 @@ import networkx as nx
 import torch
 
 from kgml_new.config import TrainConfig
+from kgml_new.data.datasets import prepare_link_prediction_dataset
 from kgml_new.data.graph import networkx_to_data
 from kgml_new.data.primekg import load_primekg_csv
 from kgml_new.embeddings.semantic import build_relation_tensor
 from kgml_new.models.baseline_gcn import BaselineGCN
 from kgml_new.models.baseline_sage import BaselineGraphSAGE
 from kgml_new.models.edge_aware_sage import EdgeAwareGraphSAGE
-from kgml_new.training.eval import link_prediction_dot_product
+from kgml_new.training.eval import evaluate_inductive_link_prediction, link_prediction_dot_product
 from kgml_new.training.link_unsupervised import compute_node_embeddings, train_unsupervised
 
 
@@ -111,6 +112,111 @@ def test_primekg_baseline_smoke():
     z = compute_node_embeddings(model, data, torch.device("cpu"), edge_aware=False)
     assert z.shape[0] == data.num_nodes
     assert z.shape[1] == cfg.out_dim
+
+
+def test_primekg_node_split_link_prediction_smoke():
+    kg_path = _get_primekg_path()
+    g = load_primekg_csv(kg_path, max_edges=2000)
+
+    dataset = prepare_link_prediction_dataset(
+        g,
+        in_dim=64,
+        seed=42,
+        val_ratio=0.1,
+        test_ratio=0.1,
+        split_protocol="node",
+    )
+
+    cfg = TrainConfig(epochs=1, batch_size=64, neg_samples=2, learning_rate=0.01)
+    model = BaselineGraphSAGE(cfg.in_dim, cfg.hidden_dim, cfg.out_dim, num_layers=2)
+
+    _, _ = train_unsupervised(
+        model,
+        dataset.train_data,
+        dataset.split.train_pos_edge_index,
+        cfg,
+        device=torch.device("cpu"),
+        edge_aware=False,
+    )
+
+    z = compute_node_embeddings(model, dataset.train_data, torch.device("cpu"), edge_aware=False)
+    assert z.shape[0] == dataset.train_data.num_nodes
+    assert z.shape[1] == cfg.out_dim
+    assert dataset.split.train_pos_edge_index.size(1) > 0
+    assert dataset.split.val_pos_edge_index.size(1) > 0
+    assert dataset.split.test_pos_edge_index.size(1) > 0
+
+
+def test_sampled_inductive_eval_returns_bucket_metrics():
+    g = nx.Graph()
+    edges = [
+        ("drug_a", "disease_a", "treats"),
+        ("drug_b", "disease_b", "treats"),
+        ("drug_c", "disease_c", "treats"),
+        ("gene_a", "drug_a", "targets"),
+        ("gene_b", "drug_b", "targets"),
+        ("gene_c", "drug_c", "targets"),
+        ("gene_a", "disease_a", "associates"),
+        ("gene_b", "disease_b", "associates"),
+        ("gene_c", "disease_c", "associates"),
+    ]
+    for src, dst, rel in edges:
+        g.add_edge(src, dst, relationship=rel)
+    for node, node_type in {
+        "drug_a": "drug",
+        "drug_b": "drug",
+        "drug_c": "drug",
+        "disease_a": "disease",
+        "disease_b": "disease",
+        "disease_c": "disease",
+        "gene_a": "gene",
+        "gene_b": "gene",
+        "gene_c": "gene",
+    }.items():
+        g.nodes[node]["node_type"] = node_type
+
+    dataset = prepare_link_prediction_dataset(
+        g,
+        in_dim=16,
+        seed=7,
+        val_ratio=0.2,
+        test_ratio=0.2,
+        split_protocol="node",
+        negative_sampling_mode="type_matched",
+        negatives_per_pos=2,
+    )
+    cfg = TrainConfig(
+        in_dim=16,
+        epochs=1,
+        batch_size=8,
+        neg_samples=2,
+        learning_rate=0.01,
+    )
+    model = BaselineGraphSAGE(cfg.in_dim, cfg.hidden_dim, cfg.out_dim, num_layers=2)
+    train_unsupervised(
+        model,
+        dataset.train_data,
+        dataset.split.train_pos_edge_index,
+        cfg,
+        device=torch.device("cpu"),
+        edge_aware=False,
+    )
+    metrics = evaluate_inductive_link_prediction(
+        model,
+        dataset.full_data,
+        pos_edge_index=dataset.split.test_pos_edge_index,
+        neg_edge_index=dataset.split.test_neg_edge_index,
+        negatives_per_pos=dataset.negatives_per_pos,
+        device=torch.device("cpu"),
+        edge_aware=False,
+        num_neighbors=cfg.num_neighbors,
+        decoder="dot",
+        query_buckets=["low"] * dataset.split.test_pos_edge_index.size(1),
+    )
+    assert "roc_auc" in metrics
+    assert "hits@10" in metrics
+    assert "bucket_metrics" in metrics
+    assert len(metrics["bucket_metrics"]) == 3
 
 
 def test_primekg_edge_aware_smoke():

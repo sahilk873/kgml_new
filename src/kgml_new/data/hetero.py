@@ -16,6 +16,9 @@ def networkx_to_heterodata(
     in_dim: int,
     seed: int = 42,
     add_reverse_edges: bool = True,
+    feature_attr: str = "feat",
+    node_type_attr: str = "node_type",
+    missing_feature_strategy: str = "random",
 ) -> HeteroData:
     """
     Convert a typed NetworkX graph into PyG HeteroData.
@@ -32,7 +35,7 @@ def networkx_to_heterodata(
 
     nodes_by_type: dict[str, list[object]] = defaultdict(list)
     for node, attrs in graph.nodes(data=True):
-        node_type = str(attrs.get("node_type", "entity"))
+        node_type = str(attrs.get(node_type_attr, "entity"))
         nodes_by_type[node_type].append(node)
 
     local_index: dict[tuple[str, object], int] = {}
@@ -41,9 +44,14 @@ def networkx_to_heterodata(
         for idx, node in enumerate(nodes):
             local_index[(node_type, node)] = idx
             attrs = graph.nodes[node]
-            feat = attrs.get("feat")
+            feat = attrs.get(feature_attr)
             if feat is None:
-                vec = rng.standard_normal(in_dim).astype(np.float32)
+                if missing_feature_strategy == "zeros":
+                    vec = np.zeros(in_dim, dtype=np.float32)
+                elif missing_feature_strategy == "ones":
+                    vec = np.ones(in_dim, dtype=np.float32)
+                else:
+                    vec = rng.standard_normal(in_dim).astype(np.float32)
             else:
                 vec = np.asarray(feat, dtype=np.float32).ravel()
                 if vec.size < in_dim:
@@ -55,8 +63,8 @@ def networkx_to_heterodata(
 
     edge_buckets: dict[tuple[str, str, str], list[tuple[int, int]]] = defaultdict(list)
     for src, dst, attrs in graph.edges(data=True):
-        src_type = str(graph.nodes[src].get("node_type", "entity"))
-        dst_type = str(graph.nodes[dst].get("node_type", "entity"))
+        src_type = str(graph.nodes[src].get(node_type_attr, "entity"))
+        dst_type = str(graph.nodes[dst].get(node_type_attr, "entity"))
         relation = get_edge_relation(attrs)
         src_idx = local_index[(src_type, src)]
         dst_idx = local_index[(dst_type, dst)]

@@ -59,7 +59,7 @@ def test_create_train_val_split_shapes():
     assert val_pos.shape[0] == 2
     assert val_neg.shape[0] == 2
     assert train_pos.shape[1] + val_pos.shape[1] == pos.shape[1]
-    assert val_neg.shape[1] == val_pos.shape[1]
+    assert val_neg.shape[1] == val_pos.shape[1] * 20
 
 
 def test_create_edge_split_negatives_are_true_non_edges():
@@ -85,6 +85,26 @@ def test_create_edge_split_negatives_are_true_non_edges():
             pair = tuple(sorted((int(neg_edges[0, i]), int(neg_edges[1, i]))))
             assert pair not in positive_pairs
             assert pair[0] != pair[1]
+
+
+def test_create_edge_split_uses_destination_node_space_for_bipartite_negatives():
+    pos = torch.tensor([[0, 1, 2], [3, 1, 0]], dtype=torch.long)
+
+    split = create_edge_split(
+        pos,
+        num_src_nodes=3,
+        num_dst_nodes=5,
+        val_ratio=1 / 3,
+        test_ratio=1 / 3,
+        seed=0,
+        undirected=False,
+        bipartite=True,
+    )
+
+    for neg_edges in (split.val_neg_edge_index, split.test_neg_edge_index):
+        assert neg_edges.size(1) > 0
+        assert int(neg_edges[0].max()) < 3
+        assert int(neg_edges[1].max()) < 5
 
 
 def test_build_train_graph_data_excludes_held_out_edges():

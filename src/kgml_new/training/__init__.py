@@ -2,6 +2,7 @@ from kgml_new.training.eval import (
     link_prediction_dot_product,
     link_prediction_mlp_torch,
     link_prediction_sklearn,
+    node_classification_scores,
 )
 from kgml_new.training.history import TrainingHistory
 from kgml_new.training.link_unsupervised import (
@@ -15,6 +16,13 @@ from kgml_new.training.node2vec_train import (
     train_node2vec_embeddings,
     train_node2vec_embeddings_with_validation,
 )
+from kgml_new.training.node_classification import (
+    NODE_CLASSIFICATION_METHODS,
+    NodeClassificationHistory,
+    train_embedding_node_classifier,
+    train_native_node_classifier,
+    train_txgnn_node_classifier,
+)
 from kgml_new.training.train_link_mlp import (
     train_link_mlp,
     train_link_mlp_with_validation,
@@ -27,9 +35,15 @@ __all__ = [
     "link_prediction_dot_product",
     "link_prediction_mlp_torch",
     "link_prediction_sklearn",
+    "node_classification_scores",
+    "NODE_CLASSIFICATION_METHODS",
+    "NodeClassificationHistory",
     "TrainingHistory",
+    "train_embedding_node_classifier",
     "train_link_mlp",
     "train_link_mlp_with_validation",
+    "train_native_node_classifier",
+    "train_txgnn_node_classifier",
     "train_node2vec_embeddings",
     "train_node2vec_embeddings_with_validation",
     "train_unsupervised",

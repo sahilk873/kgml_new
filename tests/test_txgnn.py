@@ -5,6 +5,7 @@ import torch
 
 from kgml_new.data.hetero import networkx_to_heterodata
 from kgml_new.models.txgnn import TxGNN
+from kgml_new.scripts.run_txgnn import _resolve_target_edge_type
 from kgml_new.training.txgnn_train import train_txgnn
 
 
@@ -57,3 +58,40 @@ def test_txgnn_forward_and_training_smoke():
         device=torch.device("cpu"),
     )
     assert len(history.train_loss) == 1
+
+
+def test_resolve_target_edge_type_uses_schema_for_unique_relation():
+    class Args:
+        relation = "indication"
+        source_node_type = None
+        target_node_type = None
+
+    edge_type = _resolve_target_edge_type(
+        Args(),
+        [
+            ("compound", "indication", "condition"),
+            ("condition", "rev_indication", "compound"),
+        ],
+    )
+
+    assert edge_type == ("compound", "indication", "condition")
+
+
+def test_resolve_target_edge_type_requires_disambiguation_for_ambiguous_relation():
+    class Args:
+        relation = "indication"
+        source_node_type = None
+        target_node_type = None
+
+    try:
+        _resolve_target_edge_type(
+            Args(),
+            [
+                ("compound", "indication", "condition"),
+                ("gene", "indication", "disease"),
+            ],
+        )
+    except ValueError as exc:
+        assert "--source-node-type" in str(exc)
+    else:
+        raise AssertionError("Expected ambiguous relation lookup to raise ValueError")

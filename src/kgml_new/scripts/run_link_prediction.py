@@ -1,35 +1,28 @@
 from __future__ import annotations
 
 import argparse
-import pickle
 from pathlib import Path
 
-import networkx as nx
 import torch
 
-from kgml_new.config import TrainConfig
-from kgml_new.runtime import resolve_device, seed_everything, validate_positive
-from kgml_new.data.graph import networkx_to_data
+from kgml_new.config import LinkMLPConfig, TrainConfig
+from kgml_new.data.datasets import (
+    compute_relation_diversity_buckets,
+    prepare_link_prediction_dataset,
+)
+from kgml_new.data.loaders import load_pickled_graph
 from kgml_new.embeddings.semantic import (
     build_relation_tensor,
     relation_embeddings_from_graph,
 )
 from kgml_new.models.baseline_sage import BaselineGraphSAGE
 from kgml_new.models.edge_aware_sage import EdgeAwareGraphSAGE
-from kgml_new.training.eval import link_prediction_dot_product
+from kgml_new.training.eval import evaluate_inductive_link_prediction
 from kgml_new.training.link_unsupervised import (
     compute_node_embeddings,
     train_unsupervised,
 )
-from kgml_new.training.splits import build_train_graph_data, create_edge_split
-
-
-def _load_graph(path: Path) -> nx.Graph:
-    with path.open("rb") as f:
-        obj = pickle.load(f)
-    if isinstance(obj, nx.Graph):
-        return obj
-    raise TypeError(f"Expected networkx.Graph, got {type(obj)}")
+from kgml_new.training.train_link_mlp import train_link_mlp_with_validation
 
 
 def main() -> None:
@@ -55,74 +48,62 @@ def main() -> None:
         help="For edge_sage: use OpenAI embeddings (requires kgml-new[semantic] and OPENAI_API_KEY)",
     )
     p.add_argument(
+        "--split-protocol",
+        choices=("node", "edge"),
+        default="node",
+        help="node: hold out entities from training edges for OOD evaluation; edge: legacy edge-disjoint split",
+    )
+    p.add_argument(
+        "--negative-sampling-mode",
+        choices=("global", "type_matched"),
+        default=None,
+    )
+    p.add_argument("--negatives-per-pos", type=int, default=20)
+    p.add_argument("--decoder", choices=("dot", "mlp"), default="dot")
+    p.add_argument(
+        "--shuffle-relations",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    p.add_argument(
         "--cache", type=Path, default=None, help="Pickle cache for relation embeddings"
     )
     p.add_argument("--epochs", type=int, default=20)
-    p.add_argument("--batch-size", type=int, default=None)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument(
-        "--device",
-        type=str,
-        default=None,
-        help="Torch device string, e.g. cuda, cuda:0, cpu",
-    )
-    p.add_argument(
-        "--deterministic",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Enable deterministic CuDNN behavior for reproducibility",
-    )
-    p.add_argument(
-        "--use-amp",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Override mixed precision behavior",
-    )
     p.add_argument(
         "--out", type=Path, default=None, help="Save node embeddings .pt path"
     )
     args = p.parse_args()
 
-    validate_positive("epochs", args.epochs)
-    if args.batch_size is not None:
-        validate_positive("batch_size", args.batch_size)
-    seed_everything(args.seed, deterministic=args.deterministic)
+    torch.manual_seed(args.seed)
     cfg = TrainConfig(epochs=args.epochs, seed=args.seed)
-    if args.batch_size is not None:
-        cfg.batch_size = args.batch_size
-    if args.use_amp is not None:
-        cfg.use_amp = args.use_amp
 
-    g = _load_graph(args.graph)
-    data, relation_lookup = networkx_to_data(g, in_dim=cfg.in_dim, seed=cfg.seed)
-
-    device = resolve_device(args.device)
-    mask = data.edge_index[0] < data.edge_index[1]
-    pos_edge_index = data.edge_index[:, mask].clone()
-    pos_edge_attr = data.edge_attr[mask].clone() if hasattr(data, "edge_attr") else None
-    split = create_edge_split(
-        pos_edge_index,
-        num_src_nodes=int(data.num_nodes),
+    g = load_pickled_graph(args.graph)
+    dataset = prepare_link_prediction_dataset(
+        g,
+        in_dim=cfg.in_dim,
+        seed=cfg.seed,
         val_ratio=0.1,
         test_ratio=0.1,
-        seed=cfg.seed,
-        undirected=True,
+        split_protocol=args.split_protocol,
+        negative_sampling_mode=args.negative_sampling_mode,
+        negatives_per_pos=args.negatives_per_pos,
+        decoder=args.decoder,
+        shuffle_relations=args.shuffle_relations,
     )
+    print(f"split protocol: {args.split_protocol}")
+    print(f"negative sampling mode: {dataset.negative_sampling_mode}")
+    print(f"decoder: {args.decoder}")
+    print(f"shuffle relations: {dataset.shuffle_relations}")
+    relation_lookup = dataset.relation_lookup
+    split = dataset.split
     train_pos = split.train_pos_edge_index
-    train_pos_attr = None
-    if pos_edge_attr is not None:
-        key_to_idx = {
-            (int(pos_edge_index[0, i]), int(pos_edge_index[1, i])): i
-            for i in range(pos_edge_index.size(1))
-        }
-        train_indices = [
-            key_to_idx[(int(train_pos[0, i]), int(train_pos[1, i]))]
-            for i in range(train_pos.size(1))
-        ]
-        train_pos_attr = pos_edge_attr[torch.tensor(train_indices, dtype=torch.long)]
-    train_data = build_train_graph_data(
-        data, train_pos, train_pos_edge_attr=train_pos_attr
-    )
+    train_data = dataset.train_data
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    _, diversity_buckets = compute_relation_diversity_buckets(dataset.graph, dataset.node_list)
+    val_query_buckets = [diversity_buckets[int(node)] for node in split.val_pos_edge_index[0].tolist()]
+    test_query_buckets = [diversity_buckets[int(node)] for node in split.test_pos_edge_index[0].tolist()]
+    decoder_model = None
 
     if args.model == "sage":
         model = BaselineGraphSAGE(
@@ -178,16 +159,48 @@ def main() -> None:
         )
         z = compute_node_embeddings(model, train_data, device, edge_aware=True)
 
+    if args.decoder == "mlp":
+        decoder_model, _, _ = train_link_mlp_with_validation(
+            z.detach(),
+            train_pos,
+            config=LinkMLPConfig(
+                epochs=args.epochs,
+                seed=args.seed,
+                feature_mode="concat_product",
+            ),
+            device=device,
+        )
+
     print(f"Embeddings shape: {tuple(z.shape)}")
 
     if split.val_pos_edge_index.numel() > 0:
-        val_metrics = link_prediction_dot_product(
-            z, split.val_pos_edge_index.to(z.device), split.val_neg_edge_index.to(z.device)
+        val_metrics = evaluate_inductive_link_prediction(
+            model,
+            dataset.full_data,
+            pos_edge_index=split.val_pos_edge_index,
+            neg_edge_index=split.val_neg_edge_index,
+            negatives_per_pos=dataset.negatives_per_pos,
+            device=device,
+            edge_aware=args.model == "edge_sage",
+            num_neighbors=cfg.num_neighbors,
+            decoder=args.decoder,
+            decoder_model=decoder_model,
+            query_buckets=val_query_buckets,
         )
         print("validation metrics:", val_metrics)
     if split.test_pos_edge_index.numel() > 0:
-        test_metrics = link_prediction_dot_product(
-            z, split.test_pos_edge_index.to(z.device), split.test_neg_edge_index.to(z.device)
+        test_metrics = evaluate_inductive_link_prediction(
+            model,
+            dataset.full_data,
+            pos_edge_index=split.test_pos_edge_index,
+            neg_edge_index=split.test_neg_edge_index,
+            negatives_per_pos=dataset.negatives_per_pos,
+            device=device,
+            edge_aware=args.model == "edge_sage",
+            num_neighbors=cfg.num_neighbors,
+            decoder=args.decoder,
+            decoder_model=decoder_model,
+            query_buckets=test_query_buckets,
         )
         print("test metrics:", test_metrics)
 

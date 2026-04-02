@@ -25,14 +25,21 @@ def _node_features(
     node_list: list,
     feat_dim: int,
     seed: int,
+    feature_attr: str = "feat",
+    missing_feature_strategy: str = "random",
 ) -> torch.Tensor:
     rng = np.random.default_rng(seed)
     rows: list[np.ndarray] = []
     for node in node_list:
-        if "feat" in graph.nodes[node]:
-            feat = np.asarray(graph.nodes[node]["feat"], dtype=np.float32).ravel()
+        if feature_attr in graph.nodes[node]:
+            feat = np.asarray(graph.nodes[node][feature_attr], dtype=np.float32).ravel()
         else:
-            feat = rng.standard_normal(feat_dim).astype(np.float32)
+            if missing_feature_strategy == "zeros":
+                feat = np.zeros(feat_dim, dtype=np.float32)
+            elif missing_feature_strategy == "ones":
+                feat = np.ones(feat_dim, dtype=np.float32)
+            else:
+                feat = rng.standard_normal(feat_dim).astype(np.float32)
         if feat.size < feat_dim:
             feat = np.pad(feat, (0, feat_dim - feat.size))
         elif feat.size > feat_dim:
@@ -48,6 +55,8 @@ def networkx_to_data(
     relation_lookup: dict[str, int] | None = None,
     seed: int = 42,
     add_self_loops: bool = False,
+    feature_attr: str = "feat",
+    missing_feature_strategy: str = "random",
 ) -> tuple[Data, dict[str, int]]:
     """
     Convert an undirected NetworkX graph to PyG Data.
@@ -84,7 +93,14 @@ def networkx_to_data(
     edge_index = torch.tensor([sources, targets], dtype=torch.long)
     edge_attr = torch.tensor(edge_attrs, dtype=torch.long)
 
-    x = _node_features(graph, node_list, in_dim, seed)
+    x = _node_features(
+        graph,
+        node_list,
+        in_dim,
+        seed,
+        feature_attr=feature_attr,
+        missing_feature_strategy=missing_feature_strategy,
+    )
 
     data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, num_nodes=num_nodes)
     if add_self_loops:

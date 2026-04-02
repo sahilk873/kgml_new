@@ -15,6 +15,7 @@ class BaselineGCN(nn.Module):
         out_channels: int,
         num_layers: int = 2,
         dropout: float = 0.0,
+        normalize_output: bool = True,
     ):
         super().__init__()
         self.convs = nn.ModuleList()
@@ -23,6 +24,7 @@ class BaselineGCN(nn.Module):
             self.convs.append(GCNConv(hidden_channels, hidden_channels))
         self.convs.append(GCNConv(hidden_channels, out_channels))
         self.dropout = dropout
+        self.normalize_output = normalize_output
 
     def forward(self, x: torch.Tensor, edge_index: Adj) -> torch.Tensor:
         for i, conv in enumerate(self.convs[:-1]):
@@ -30,4 +32,6 @@ class BaselineGCN(nn.Module):
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.convs[-1](x, edge_index)
-        return F.normalize(x, p=2, dim=-1)
+        if self.normalize_output:
+            x = F.normalize(x, p=2, dim=-1)
+        return x

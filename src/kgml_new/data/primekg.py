@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-import networkx as nx
-import pandas as pd
 from pathlib import Path
+
+import networkx as nx
+
+from kgml_new.data.loaders import PRIMEKG_CSV_SPEC, load_graph_csv
 
 
 def load_primekg_csv(
@@ -23,20 +25,24 @@ def load_primekg_csv(
         source_col: Column name for source node
         target_col: Column name for target node
     """
-    df = pd.read_csv(csv_path)
-
-    if max_edges is not None:
-        df = df.head(max_edges)
-
-    g = nx.Graph()
-
-    for _, row in df.iterrows():
-        src = str(row[source_col])
-        tgt = str(row[target_col])
-        rel = str(row[relation_col])
-
-        g.add_node(src, node_type=row.get("x_type", "unknown"))
-        g.add_node(tgt, node_type=row.get("y_type", "unknown"))
-        g.add_edge(src, tgt, relationship=rel)
-
-    return g
+    spec = PRIMEKG_CSV_SPEC
+    if (
+        relation_col != PRIMEKG_CSV_SPEC.relation_col
+        or source_col != PRIMEKG_CSV_SPEC.source_col
+        or target_col != PRIMEKG_CSV_SPEC.target_col
+    ):
+        spec = type(PRIMEKG_CSV_SPEC)(
+            source_col=source_col,
+            target_col=target_col,
+            relation_col=relation_col,
+            source_type_col=PRIMEKG_CSV_SPEC.source_type_col,
+            target_type_col=PRIMEKG_CSV_SPEC.target_type_col,
+            source_id_col=PRIMEKG_CSV_SPEC.source_id_col,
+            target_id_col=PRIMEKG_CSV_SPEC.target_id_col,
+            node_type_attr=PRIMEKG_CSV_SPEC.node_type_attr,
+            relation_attr=PRIMEKG_CSV_SPEC.relation_attr,
+            default_node_type=PRIMEKG_CSV_SPEC.default_node_type,
+            edge_attr_cols=PRIMEKG_CSV_SPEC.edge_attr_cols,
+            directed=PRIMEKG_CSV_SPEC.directed,
+        )
+    return load_graph_csv(csv_path, spec=spec, max_edges=max_edges)
