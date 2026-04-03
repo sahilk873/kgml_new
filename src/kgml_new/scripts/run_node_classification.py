@@ -12,6 +12,7 @@ from kgml_new.data.datasets import (
     prepare_node_classification_dataset,
 )
 from kgml_new.data.loaders import load_pickled_graph
+from kgml_new.models.edge_aware_sage import EDGE_RELATION_MODES
 from kgml_new.training.node_classification import (
     NODE_CLASSIFICATION_METHODS,
     train_embedding_node_classifier,
@@ -34,6 +35,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embedding-dim", type=int, default=64)
     parser.add_argument("--edge-dim", type=int, default=32)
     parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--semantic", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--semantic-cache", type=Path, default=None)
+    parser.add_argument("--strict-semantic", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--edge-relation-mode", choices=EDGE_RELATION_MODES, default="concat")
+    parser.add_argument("--num-relation-bases", type=int, default=4)
     parser.add_argument("--out", type=Path, default=None)
     return parser.parse_args()
 
@@ -65,6 +71,8 @@ def main() -> None:
             classifier_epochs=args.classifier_epochs,
             batch_size=args.batch_size,
             seed=args.seed,
+            edge_relation_mode=args.edge_relation_mode,
+            num_relation_bases=args.num_relation_bases,
         )
         _, _, history, val_metrics, test_metrics = train_txgnn_node_classifier(
             dataset.data,
@@ -105,6 +113,8 @@ def main() -> None:
             classifier_epochs=args.classifier_epochs,
             batch_size=args.batch_size,
             seed=args.seed,
+            edge_relation_mode=args.edge_relation_mode,
+            num_relation_bases=args.num_relation_bases,
         )
         if spec.kind == "native":
             _, history, val_metrics, test_metrics = train_native_node_classifier(
@@ -112,12 +122,20 @@ def main() -> None:
                 dataset.data,
                 cfg,
                 device=device,
+                graph=graph,
                 relation_lookup=dataset.relation_lookup,
+                use_semantic=args.semantic,
+                semantic_cache=args.semantic_cache,
+                strict_semantic=args.strict_semantic,
             )
             result = {
                 "method": args.method,
                 "task": "node_classification",
                 "kind": spec.kind,
+                "edge_relation_mode": args.edge_relation_mode,
+                "num_relation_bases": args.num_relation_bases,
+                "semantic": args.semantic,
+                "semantic_cache": str(args.semantic_cache) if args.semantic_cache else None,
                 "num_classes": len(dataset.label_lookup),
                 "label_attr": args.label_attr,
                 "val_metrics": val_metrics,
@@ -141,6 +159,10 @@ def main() -> None:
                 "method": args.method,
                 "task": "node_classification",
                 "kind": spec.kind,
+                "edge_relation_mode": args.edge_relation_mode,
+                "num_relation_bases": args.num_relation_bases,
+                "semantic": args.semantic,
+                "semantic_cache": str(args.semantic_cache) if args.semantic_cache else None,
                 "num_classes": len(dataset.label_lookup),
                 "label_attr": args.label_attr,
                 "val_metrics": val_metrics,

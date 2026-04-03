@@ -13,13 +13,21 @@ from kgml_new.data.loaders import GraphCSVSpec, PRIMEKG_CSV_SPEC, load_graph_csv
 from kgml_new.data.primekg import load_primekg_csv
 from kgml_new.models.baseline_gcn import BaselineGCN
 from kgml_new.models.baseline_sage import BaselineGraphSAGE
-from kgml_new.models.edge_aware_sage import EdgeAwareGraphSAGE
+from kgml_new.models.edge_aware_sage import (
+    EDGE_RELATION_MODES,
+    EdgeAwareGraphSAGE,
+    RelationBasisMixtureGraphSAGE,
+    RelationGatedGraphSAGE,
+    build_edge_aware_model,
+)
 from kgml_new.models.txgnn import TxGNN
 from kgml_new.training.splits import EdgeSplit, NodeSplit
 
 __all__ = [
     "BaselineGCN",
     "BaselineGraphSAGE",
+    "build_edge_aware_model",
+    "EDGE_RELATION_MODES",
     "EdgeSplit",
     "EdgeAwareGraphSAGE",
     "GraphCSVSpec",
@@ -28,6 +36,8 @@ __all__ = [
     "NodeClassificationConfig",
     "NodeClassificationDataset",
     "PRIMEKG_CSV_SPEC",
+    "RelationBasisMixtureGraphSAGE",
+    "RelationGatedGraphSAGE",
     "NodeSplit",
     "TxGNN",
     "LinkMLPConfig",

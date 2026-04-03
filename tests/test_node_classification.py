@@ -44,7 +44,8 @@ def test_prepare_node_classification_dataset_smoke():
     assert len(dataset.label_lookup) == 2
 
 
-def test_graphsage_node_classification_smoke():
+@pytest.mark.parametrize("edge_relation_mode", ["concat", "gated", "basis_mixture"])
+def test_graphsage_node_classification_smoke(edge_relation_mode):
     dataset = prepare_node_classification_dataset(
         _toy_labeled_graph(),
         in_dim=16,
@@ -59,12 +60,15 @@ def test_graphsage_node_classification_smoke():
         batch_size=2,
         num_neighbors=[2, 2],
         seed=0,
+        edge_relation_mode=edge_relation_mode,
+        num_relation_bases=3,
     )
     _, history, val_metrics, test_metrics = train_native_node_classifier(
-        "sage",
+        "edge_sage",
         dataset.data,
         cfg,
         device=torch.device("cpu"),
+        graph=_toy_labeled_graph(),
         relation_lookup=dataset.relation_lookup,
     )
     assert len(history.epoch) == 2
@@ -145,8 +149,19 @@ def _primekg_node_classification_graph() -> nx.Graph:
     return graph
 
 
-@pytest.mark.parametrize("method", ["sage", "gcn", "edge_sage", "node2vec", "link_mlp"])
-def test_primekg_node_classification_smoke(method: str):
+@pytest.mark.parametrize(
+    ("method", "edge_relation_mode"),
+    [
+        ("sage", "concat"),
+        ("gcn", "concat"),
+        ("edge_sage", "concat"),
+        ("edge_sage", "gated"),
+        ("edge_sage", "basis_mixture"),
+        ("node2vec", "concat"),
+        ("link_mlp", "concat"),
+    ],
+)
+def test_primekg_node_classification_smoke(method: str, edge_relation_mode: str):
     graph = _primekg_node_classification_graph()
     dataset = prepare_node_classification_dataset(
         graph,
@@ -165,6 +180,8 @@ def test_primekg_node_classification_smoke(method: str):
         classifier_epochs=1,
         batch_size=64,
         seed=0,
+        edge_relation_mode=edge_relation_mode,
+        num_relation_bases=3,
     )
     if method in {"sage", "gcn", "edge_sage"}:
         _, history, val_metrics, test_metrics = train_native_node_classifier(
@@ -172,6 +189,7 @@ def test_primekg_node_classification_smoke(method: str):
             dataset.data,
             cfg,
             device=torch.device("cpu"),
+            graph=graph,
             relation_lookup=dataset.relation_lookup,
         )
     else:

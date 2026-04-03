@@ -20,6 +20,8 @@ class TrainConfig:
     seed: int = 42
     dropout: float = 0.0
     concat: bool = True
+    edge_relation_mode: str = "concat"
+    num_relation_bases: int = 4
 
 
 @dataclass
@@ -45,6 +47,8 @@ class Node2VecConfig:
     batch_size: int = 512
     learning_rate: float = 0.01
     seed: int = 42
+    use_amp: bool = True
+    grad_clip_norm: float = 1.0
 
 
 @dataclass
@@ -87,3 +91,5 @@ class NodeClassificationConfig:
     test_ratio: float = 0.2
     seed: int = 42
     concat: bool = True
+    edge_relation_mode: str = "concat"
+    num_relation_bases: int = 4

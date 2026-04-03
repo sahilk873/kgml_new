@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import networkx as nx
+import pytest
 import torch
 
 from kgml_new.config import TrainConfig
 from kgml_new.data.graph import networkx_to_data
 from kgml_new.embeddings.semantic import build_relation_tensor
 from kgml_new.models.baseline_sage import BaselineGraphSAGE
-from kgml_new.models.edge_aware_sage import EdgeAwareGraphSAGE
+from kgml_new.models.edge_aware_sage import build_edge_aware_model
 from kgml_new.training.link_unsupervised import (
     create_train_val_split,
     train_unsupervised,
@@ -164,7 +165,8 @@ def test_train_unsupervised_fullgraph_with_validation_smoke(tmp_path):
     assert history_path.exists()
 
 
-def test_train_unsupervised_edge_aware_with_validation_smoke():
+@pytest.mark.parametrize("edge_relation_mode", ["concat", "gated", "basis_mixture"])
+def test_train_unsupervised_edge_aware_with_validation_smoke(edge_relation_mode):
     data, relation_lookup = networkx_to_data(_toy_graph(), in_dim=16, seed=0)
     mask = data.edge_index[0] < data.edge_index[1]
     pos = data.edge_index[:, mask]
@@ -182,13 +184,22 @@ def test_train_unsupervised_edge_aware_with_validation_smoke():
         edge_dim=edge_dim,
         hidden_dim=8,
         out_dim=16,
+        edge_relation_mode=edge_relation_mode,
         epochs=2,
         batch_size=8,
         neg_samples=2,
         learning_rate=0.05,
     )
-    model = EdgeAwareGraphSAGE(
-        16, edge_dim, 8, 16, relation_table=relation_table, num_layers=2, concat=True
+    model = build_edge_aware_model(
+        edge_relation_mode=edge_relation_mode,
+        in_channels=16,
+        edge_dim=edge_dim,
+        hidden_channels=8,
+        out_channels=16,
+        relation_table=relation_table,
+        num_layers=2,
+        concat=True,
+        num_relation_bases=3,
     )
 
     _, last_epoch, history = train_unsupervised_fullgraph(

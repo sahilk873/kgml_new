@@ -16,7 +16,7 @@ from kgml_new.embeddings.semantic import (
     relation_embeddings_from_graph,
 )
 from kgml_new.models.baseline_sage import BaselineGraphSAGE
-from kgml_new.models.edge_aware_sage import EdgeAwareGraphSAGE
+from kgml_new.models.edge_aware_sage import EDGE_RELATION_MODES, build_edge_aware_model
 from kgml_new.training.eval import evaluate_inductive_link_prediction
 from kgml_new.training.link_unsupervised import (
     compute_node_embeddings,
@@ -68,6 +68,18 @@ def main() -> None:
     p.add_argument(
         "--cache", type=Path, default=None, help="Pickle cache for relation embeddings"
     )
+    p.add_argument(
+        "--edge-relation-mode",
+        choices=EDGE_RELATION_MODES,
+        default="concat",
+        help="How projected relation embeddings control edge-aware message passing.",
+    )
+    p.add_argument(
+        "--num-relation-bases",
+        type=int,
+        default=4,
+        help="Number of shared basis message transforms for basis_mixture mode.",
+    )
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
@@ -95,6 +107,7 @@ def main() -> None:
     print(f"negative sampling mode: {dataset.negative_sampling_mode}")
     print(f"decoder: {args.decoder}")
     print(f"shuffle relations: {dataset.shuffle_relations}")
+    print(f"edge relation mode: {args.edge_relation_mode}")
     relation_lookup = dataset.relation_lookup
     split = dataset.split
     train_pos = split.train_pos_edge_index
@@ -139,15 +152,18 @@ def main() -> None:
         rel_table = build_relation_tensor(
             rel_emb, relation_lookup, cfg.edge_dim, device
         )
-        model = EdgeAwareGraphSAGE(
-            cfg.in_dim,
-            cfg.edge_dim,
-            cfg.hidden_dim,
-            cfg.out_dim,
+        model = build_edge_aware_model(
+            edge_relation_mode=args.edge_relation_mode,
+            in_channels=cfg.in_dim,
+            edge_dim=cfg.edge_dim,
+            hidden_channels=cfg.hidden_dim,
+            out_channels=cfg.out_dim,
             relation_table=rel_table,
             num_layers=cfg.num_layers,
             dropout=cfg.dropout,
             concat=cfg.concat,
+            normalize_output=True,
+            num_relation_bases=args.num_relation_bases,
         )
         train_unsupervised(
             model,

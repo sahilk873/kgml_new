@@ -12,7 +12,12 @@ from kgml_new.data.primekg import load_primekg_csv
 from kgml_new.embeddings.semantic import build_relation_tensor
 from kgml_new.models.baseline_gcn import BaselineGCN
 from kgml_new.models.baseline_sage import BaselineGraphSAGE
-from kgml_new.models.edge_aware_sage import EdgeAwareGraphSAGE
+from kgml_new.models.edge_aware_sage import (
+    EdgeAwareGraphSAGE,
+    RelationBasisMixtureGraphSAGE,
+    RelationGatedGraphSAGE,
+    build_edge_aware_model,
+)
 from kgml_new.training.eval import evaluate_inductive_link_prediction, link_prediction_dot_product
 from kgml_new.training.link_unsupervised import compute_node_embeddings, train_unsupervised
 
@@ -102,6 +107,84 @@ def test_edge_aware_projects_full_relation_table_to_edge_space():
     assert m.relation_input_dim == relation_input_dim
     assert m.edge_dim == edge_dim
     assert z.shape == (data.num_nodes, 16)
+
+
+def test_relation_gated_forward_shape():
+    data, relation_lookup = _toy_data()
+    relation_input_dim = 24
+    edge_dim = 8
+    rel_emb = {k: torch.randn(relation_input_dim) * 0.1 for k in relation_lookup}
+    rt = build_relation_tensor(rel_emb, relation_lookup, edge_dim, torch.device("cpu"))
+
+    m = RelationGatedGraphSAGE(
+        in_channels=16,
+        edge_dim=edge_dim,
+        hidden_channels=8,
+        out_channels=16,
+        relation_table=rt,
+        num_layers=2,
+        dropout=0.0,
+    )
+    z = m(data.x, data.edge_index, data.edge_attr)
+    assert z.shape == (data.num_nodes, 16)
+    assert m.relation_table.requires_grad is False
+
+
+def test_relation_basis_mixture_forward_shape():
+    data, relation_lookup = _toy_data()
+    relation_input_dim = 24
+    edge_dim = 8
+    rel_emb = {k: torch.randn(relation_input_dim) * 0.1 for k in relation_lookup}
+    rt = build_relation_tensor(rel_emb, relation_lookup, edge_dim, torch.device("cpu"))
+
+    m = RelationBasisMixtureGraphSAGE(
+        in_channels=16,
+        edge_dim=edge_dim,
+        hidden_channels=8,
+        out_channels=16,
+        relation_table=rt,
+        num_bases=3,
+        num_layers=2,
+        dropout=0.0,
+    )
+    z = m(data.x, data.edge_index, data.edge_attr)
+    assert z.shape == (data.num_nodes, 16)
+    assert m.num_bases == 3
+
+
+def test_build_edge_aware_model_selects_requested_mode():
+    data, relation_lookup = _toy_data()
+    rel_emb = {k: torch.randn(8) * 0.1 for k in relation_lookup}
+    rt = build_relation_tensor(rel_emb, relation_lookup, 8, torch.device("cpu"))
+
+    concat_model = build_edge_aware_model(
+        edge_relation_mode="concat",
+        in_channels=16,
+        edge_dim=8,
+        hidden_channels=8,
+        out_channels=16,
+        relation_table=rt,
+    )
+    gated_model = build_edge_aware_model(
+        edge_relation_mode="gated",
+        in_channels=16,
+        edge_dim=8,
+        hidden_channels=8,
+        out_channels=16,
+        relation_table=rt,
+    )
+    basis_model = build_edge_aware_model(
+        edge_relation_mode="basis_mixture",
+        in_channels=16,
+        edge_dim=8,
+        hidden_channels=8,
+        out_channels=16,
+        relation_table=rt,
+        num_relation_bases=5,
+    )
+    assert isinstance(concat_model, EdgeAwareGraphSAGE)
+    assert isinstance(gated_model, RelationGatedGraphSAGE)
+    assert isinstance(basis_model, RelationBasisMixtureGraphSAGE)
 
 
 def _get_primekg_path() -> Path:

@@ -9,10 +9,10 @@ from torch import nn
 from torch_geometric.data import Data
 
 from kgml_new.config import NodeClassificationConfig, TrainConfig
-from kgml_new.embeddings.semantic import build_relation_tensor
+from kgml_new.embeddings.semantic import build_relation_tensor, relation_embeddings_from_graph
 from kgml_new.models.baseline_gcn import BaselineGCN
 from kgml_new.models.baseline_sage import BaselineGraphSAGE
-from kgml_new.models.edge_aware_sage import EdgeAwareGraphSAGE
+from kgml_new.models.edge_aware_sage import build_edge_aware_model
 from kgml_new.models.node_classifier import NodeClassificationMLP
 from kgml_new.models.txgnn import TxGNN
 from kgml_new.training.link_unsupervised import compute_node_embeddings, train_unsupervised
@@ -67,7 +67,11 @@ def _evaluate_masked_logits(logits: torch.Tensor, y: torch.Tensor, mask: torch.T
 def _build_native_model(
     method: str,
     cfg: NodeClassificationConfig,
+    graph=None,
     relation_lookup: dict[str, int] | None = None,
+    use_semantic: bool = False,
+    semantic_cache=None,
+    strict_semantic: bool = False,
 ) -> nn.Module:
     if method == "sage":
         return BaselineGraphSAGE(
@@ -88,25 +92,33 @@ def _build_native_model(
             normalize_output=False,
         )
     if method == "edge_sage":
-        if relation_lookup is None:
+        if relation_lookup is None or graph is None:
             raise ValueError("relation_lookup is required for edge_sage node classification")
-        rel_emb = {rel: torch.randn(cfg.edge_dim) * 0.1 for rel in relation_lookup}
+        rel_emb = relation_embeddings_from_graph(
+            graph,
+            edge_dim=cfg.edge_dim,
+            cache_path=semantic_cache,
+            use_openai=use_semantic,
+            strict_openai=strict_semantic,
+        )
         relation_table = build_relation_tensor(
             rel_emb,
             relation_lookup,
             cfg.edge_dim,
             torch.device("cpu"),
         )
-        return EdgeAwareGraphSAGE(
-            cfg.in_dim,
-            cfg.edge_dim,
-            cfg.hidden_dim,
-            cfg.num_classes,
+        return build_edge_aware_model(
+            edge_relation_mode=cfg.edge_relation_mode,
+            in_channels=cfg.in_dim,
+            edge_dim=cfg.edge_dim,
+            hidden_channels=cfg.hidden_dim,
+            out_channels=cfg.num_classes,
             relation_table=relation_table,
             num_layers=cfg.num_layers,
             dropout=cfg.dropout,
             concat=cfg.concat,
             normalize_output=False,
+            num_relation_bases=cfg.num_relation_bases,
         )
     raise ValueError(f"Unsupported native node classification method: {method}")
 
@@ -117,7 +129,11 @@ def train_native_node_classifier(
     cfg: NodeClassificationConfig,
     *,
     device: torch.device | None = None,
+    graph=None,
     relation_lookup: dict[str, int] | None = None,
+    use_semantic: bool = False,
+    semantic_cache=None,
+    strict_semantic: bool = False,
 ) -> tuple[nn.Module, NodeClassificationHistory, dict[str, float], dict[str, float]]:
     from torch_geometric.loader import NeighborLoader
     from torch_geometric.typing import WITH_PYG_LIB, WITH_TORCH_SPARSE
@@ -125,7 +141,15 @@ def train_native_node_classifier(
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = _build_native_model(method, cfg, relation_lookup=relation_lookup).to(device)
+    model = _build_native_model(
+        method,
+        cfg,
+        graph=graph,
+        relation_lookup=relation_lookup,
+        use_semantic=use_semantic,
+        semantic_cache=semantic_cache,
+        strict_semantic=strict_semantic,
+    ).to(device)
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=cfg.learning_rate,

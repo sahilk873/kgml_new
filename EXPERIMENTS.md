@@ -34,6 +34,12 @@ Semantic prompts use `relation_glossary.tsv` for DRKG-style sourced predicates a
 Semantic caches keep the full OpenAI embedding width; the edge-aware model learns a projection into the configured message-space `edge_dim`.
 Legacy semantic caches saved before the full-width change are automatically regenerated when reused.
 
+Edge-aware methods support three relation-control modes:
+
+- `concat`: baseline path, projected relation embedding is concatenated into the message
+- `gated`: projected relation embedding produces a sigmoid gate over the learned neighbor message
+- `basis_mixture`: projected relation embedding produces mixture weights over `K` shared basis message transforms
+
 ## Supported Inputs
 
 ### Generic runner: `run_gpu_method`
@@ -167,8 +173,38 @@ Edge-aware GraphSAGE:
   --split-protocol node \
   --semantic \
   --semantic-cache cache/primekg-edge-aware-semantic.pt \
+  --edge-relation-mode concat \
   --epochs 200 \
   --output results/edge_aware_sage-node.json
+```
+
+Relation-gated GraphSAGE:
+
+```bash
+.venv/bin/python -m kgml_new.scripts.run_gpu_method \
+  --method edge_aware_sage \
+  --input drkg.tsv \
+  --split-protocol node \
+  --semantic \
+  --semantic-cache cache/drkg-relations.pt \
+  --edge-relation-mode gated \
+  --epochs 200 \
+  --output results/edge_aware_sage-gated-node.json
+```
+
+Relation-basis-mixture GraphSAGE:
+
+```bash
+.venv/bin/python -m kgml_new.scripts.run_gpu_method \
+  --method edge_aware_sage \
+  --input drkg.tsv \
+  --split-protocol node \
+  --semantic \
+  --semantic-cache cache/drkg-relations.pt \
+  --edge-relation-mode basis_mixture \
+  --num-relation-bases 4 \
+  --epochs 200 \
+  --output results/edge_aware_sage-basis-node.json
 ```
 
 Precompute a DRKG glossary-first relation cache once and reuse it:
@@ -220,6 +256,8 @@ Link MLP scorer:
 - `--semantic` / `--no-semantic`: use OpenAI semantic relation embeddings or random relation embeddings for edge-aware methods
 - `--semantic-cache`: cache file for relation embeddings
 - `--strict-semantic`: fail instead of silently falling back if semantic embedding setup fails
+- `--edge-relation-mode {concat,gated,basis_mixture}`: how projected relation embeddings control message passing
+- `--num-relation-bases`: number of shared basis transforms for `basis_mixture`
 - `--epochs`
 - `--seed`
 - `--in-dim`
@@ -243,6 +281,9 @@ Link MLP scorer:
 - defaults to OpenAI semantic relation embeddings in both `run_gpu_method` and `run_link_prediction`
 - use `--no-semantic` for the random-initialized ablation
 - semantic prompts use `relation_glossary.tsv` for DRKG-style sourced predicates and fall back to raw relation strings otherwise
+- `concat` is the current baseline
+- `gated` uses the relation embedding to gate the learned neighbor message
+- `basis_mixture` uses the relation embedding to mix over `K` learned basis message transforms
 
 `node2vec`
 
@@ -290,6 +331,7 @@ Edge-aware semantic example:
   --model edge_sage \
   --semantic \
   --cache cache/relation_emb.pkl \
+  --edge-relation-mode gated \
   --split-protocol node \
   --epochs 20 \
   --out artifacts/edge_sage.pt
@@ -301,6 +343,8 @@ Important arguments:
 - `--model {sage,edge_sage}`
 - `--semantic / --no-semantic`
 - `--cache`: relation embedding cache
+- `--edge-relation-mode {concat,gated,basis_mixture}`
+- `--num-relation-bases`
 - `--split-protocol {node,edge}`
 - `--negative-sampling-mode {global,type_matched}`
 - `--negatives-per-pos`
@@ -319,6 +363,7 @@ python -m kgml_new.scripts.generate_relation_embeddings --help
 ```
 
 This script creates the cached relation embedding table used by the edge-aware semantic runners.
+The same semantic cache can be reused across `concat`, `gated`, and `basis_mixture` runs because the cache stores relation embeddings only, not the message-passing mechanism.
 
 Example for DRKG:
 
@@ -423,6 +468,11 @@ Important arguments:
 - `--method {sage,gcn,edge_sage,node2vec,link_mlp,txgnn}`
 - `--label-attr`
 - `--target-node-type`
+- `--semantic / --no-semantic`: for `edge_sage`
+- `--semantic-cache`: relation embedding cache for `edge_sage`
+- `--strict-semantic`: fail instead of silently falling back for `edge_sage`
+- `--edge-relation-mode {concat,gated,basis_mixture}`: for `edge_sage`
+- `--num-relation-bases`: for `basis_mixture`
 - `--epochs`
 - `--classifier-epochs`
 - `--seed`
@@ -432,6 +482,22 @@ Important arguments:
 - `--edge-dim`
 - `--batch-size`
 - `--out`
+
+Edge-aware node classification example:
+
+```bash
+.venv/bin/python -m kgml_new.scripts.run_node_classification \
+  --graph data/graph.pkl \
+  --method edge_sage \
+  --semantic \
+  --semantic-cache cache/relation_emb.pkl \
+  --edge-relation-mode basis_mixture \
+  --num-relation-bases 4 \
+  --label-attr label \
+  --epochs 20 \
+  --classifier-epochs 20 \
+  --out results/node_cls_edge_basis.json
+```
 
 ## Output Format
 
@@ -449,6 +515,14 @@ Experiment runners write JSON with fields like:
 - `test_metrics`
 - `metrics`
 
+Edge-aware runs also record:
+
+- `relation_init`
+- `edge_relation_mode`
+- `num_relation_bases`
+- `semantic`
+- `semantic_cache`
+
 For node-disjoint link prediction, `metrics` is the test-set metrics.
 
 ## Recommended Experiment Matrix
@@ -460,6 +534,8 @@ For the main link-prediction study, run:
 3. `edge_aware_sage` with `--split-protocol node`
 4. `link_mlp` with `--split-protocol node`
 5. `edge_aware_link_mlp` with `--split-protocol node`
+6. rerun `edge_aware_sage` with `--edge-relation-mode gated`
+7. rerun `edge_aware_sage` with `--edge-relation-mode basis_mixture`
 
 Optional baselines:
 
@@ -491,6 +567,9 @@ Adjust paths, partitions, memory, and output locations for your cluster before s
 
 - Use `--max-edges` first for smoke tests before launching full runs.
 - `run_gpu_method` is the easiest entrypoint for raw PrimeKG CSV and raw DRKG TSV.
+- `run_gpu_method` is the main end-to-end link prediction runner: it loads the graph, builds the split, trains one chosen method, evaluates it, and writes a JSON summary.
 - `run_link_prediction` is better when you already have a pickled graph and want semantic relation embeddings.
 - Under node split, a method must support inductive embeddings for unseen nodes to be part of the main comparison.
 - DRKG can be extremely large. Start with subsets to validate runtime and memory on your machine.
+- `drkg.tsv` is ordered by relation block, so prefix slices can be low-diversity or single-relation. Prefer shuffled, random, or stratified DRKG subsets for semantic-vs-random comparisons.
+- If you already have a full DRKG semantic cache such as `cache/drkg-relations.pt`, you usually do not need to rebuild it for shuffled DRKG subsets as long as the subset relation names are covered.

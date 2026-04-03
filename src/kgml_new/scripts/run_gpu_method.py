@@ -18,7 +18,7 @@ from kgml_new.embeddings.semantic import (
 )
 from kgml_new.models.baseline_gcn import BaselineGCN
 from kgml_new.models.baseline_sage import BaselineGraphSAGE
-from kgml_new.models.edge_aware_sage import EdgeAwareGraphSAGE
+from kgml_new.models.edge_aware_sage import EDGE_RELATION_MODES, build_edge_aware_model
 from kgml_new.training.eval import evaluate_inductive_link_prediction, link_prediction_dot_product
 from kgml_new.training.link_unsupervised import (
     compute_node_embeddings,
@@ -94,6 +94,18 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Fail instead of falling back if OpenAI semantic embedding setup fails.",
+    )
+    parser.add_argument(
+        "--edge-relation-mode",
+        choices=EDGE_RELATION_MODES,
+        default="concat",
+        help="How projected relation embeddings control edge-aware message passing.",
+    )
+    parser.add_argument(
+        "--num-relation-bases",
+        type=int,
+        default=4,
+        help="Number of shared basis message transforms for basis_mixture mode.",
     )
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
@@ -176,6 +188,27 @@ def build_edge_aware_relation_table(
     return relation_table, relation_init
 
 
+def build_edge_aware_encoder(
+    *,
+    cfg: TrainConfig,
+    relation_table: torch.Tensor,
+    normalize_output: bool = True,
+):
+    return build_edge_aware_model(
+        edge_relation_mode=cfg.edge_relation_mode,
+        in_channels=cfg.in_dim,
+        edge_dim=cfg.edge_dim,
+        hidden_channels=cfg.hidden_dim,
+        out_channels=cfg.out_dim,
+        relation_table=relation_table,
+        num_layers=cfg.num_layers,
+        dropout=cfg.dropout,
+        concat=cfg.concat,
+        normalize_output=normalize_output,
+        num_relation_bases=cfg.num_relation_bases,
+    )
+
+
 def maybe_train_decoder(
     *,
     decoder: str,
@@ -241,6 +274,8 @@ def main() -> None:
         "semantic": args.semantic,
         "semantic_cache": str(args.semantic_cache) if args.semantic_cache else None,
         "strict_semantic": args.strict_semantic,
+        "edge_relation_mode": args.edge_relation_mode,
+        "num_relation_bases": args.num_relation_bases,
         "max_edges": args.max_edges,
         "in_dim": args.in_dim,
         "epochs": args.epochs,
@@ -372,7 +407,12 @@ def main() -> None:
         output["metrics"] = test_metrics
 
     elif args.method == "edge_aware_sage":
-        cfg = TrainConfig(epochs=args.epochs, seed=args.seed)
+        cfg = TrainConfig(
+            epochs=args.epochs,
+            seed=args.seed,
+            edge_relation_mode=args.edge_relation_mode,
+            num_relation_bases=args.num_relation_bases,
+        )
         edge_dim = cfg.edge_dim
         relation_table, relation_init = build_edge_aware_relation_table(
             args=args,
@@ -381,16 +421,7 @@ def main() -> None:
             edge_dim=edge_dim,
             device=device,
         )
-        model = EdgeAwareGraphSAGE(
-            cfg.in_dim,
-            edge_dim,
-            cfg.hidden_dim,
-            cfg.out_dim,
-            relation_table=relation_table,
-            num_layers=cfg.num_layers,
-            dropout=cfg.dropout,
-            concat=cfg.concat,
-        )
+        model = build_edge_aware_encoder(cfg=cfg, relation_table=relation_table)
         model, last_epoch, history = train_unsupervised_batched(
             model,
             train_data,
@@ -530,7 +561,12 @@ def main() -> None:
         output["metrics"] = output["test_metrics"]
 
     else:
-        base_cfg = TrainConfig(epochs=args.epochs, seed=args.seed)
+        base_cfg = TrainConfig(
+            epochs=args.epochs,
+            seed=args.seed,
+            edge_relation_mode=args.edge_relation_mode,
+            num_relation_bases=args.num_relation_bases,
+        )
         edge_dim = base_cfg.edge_dim
         relation_table, relation_init = build_edge_aware_relation_table(
             args=args,
@@ -539,16 +575,7 @@ def main() -> None:
             edge_dim=edge_dim,
             device=device,
         )
-        base_model = EdgeAwareGraphSAGE(
-            base_cfg.in_dim,
-            edge_dim,
-            base_cfg.hidden_dim,
-            base_cfg.out_dim,
-            relation_table=relation_table,
-            num_layers=base_cfg.num_layers,
-            dropout=base_cfg.dropout,
-            concat=base_cfg.concat,
-        )
+        base_model = build_edge_aware_encoder(cfg=base_cfg, relation_table=relation_table)
         base_model, base_last_epoch, base_history = train_unsupervised_batched(
             base_model,
             train_data,
