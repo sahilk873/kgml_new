@@ -59,6 +59,9 @@ class LinkMLPConfig:
     neg_ratio: int = 1
     seed: int = 42
     feature_mode: str = "concat_product"
+    early_stop_patience: int = 20
+    grad_clip_norm: float = 1.0
+    use_amp: bool = True
 
 
 @dataclass

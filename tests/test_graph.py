@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+import types
 
 import networkx as nx
 import pandas as pd
@@ -12,6 +14,8 @@ from kgml_new.data.datasets import (
 )
 from kgml_new.data.graph import networkx_to_data
 from kgml_new.data.loaders import GraphCSVSpec, load_graph_csv
+from kgml_new.embeddings import semantic as semantic_module
+from kgml_new.embeddings.semantic import describe_relation, relation_embeddings_from_relation_types
 
 
 def test_networkx_to_data():
@@ -80,6 +84,82 @@ def test_load_graph_csv_headerless_tsv_drkg_style(tmp_path: Path):
     assert graph.nodes["Disease::DOID:1234"]["node_type"] == "disease"
     assert graph["Gene::2157"]["Gene::5264"]["relationship"] == "bioarx::HumGenHumGen:Gene:Gene"
     assert graph["Compound::DB001"]["Disease::DOID:1234"]["relationship"] == "DRUGBANK::treats"
+
+
+def test_describe_relation_prefers_glossary_then_falls_back(tmp_path: Path):
+    glossary_path = tmp_path / "relation_glossary.tsv"
+    glossary_path.write_text(
+        "\t".join(
+            [
+                "Relation-name",
+                "Data-source",
+                "Connected entity-types",
+                "Interaction-type",
+                "Description",
+                "Reference for the description",
+            ]
+        )
+        + "\n"
+        + "\t".join(
+            [
+                "bioarx::HumGenHumGen:Gene:Gene",
+                "BioARX",
+                "Gene:Gene",
+                "interaction",
+                "Protein-protein interaction",
+                "ref",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    glossary_description = describe_relation(
+        "bioarx::HumGenHumGen:Gene:Gene",
+        glossary_path=glossary_path,
+    )
+    fallback_description = describe_relation(
+        "unknown::rel",
+        glossary_path=glossary_path,
+    )
+    primekg_style_description = describe_relation(
+        "drug_protein",
+        glossary_path=glossary_path,
+    )
+
+    assert "Protein-protein interaction" in glossary_description
+    assert "Data source: BioARX." in glossary_description
+    assert fallback_description == "Relationship type: unknown::rel"
+    assert primekg_style_description == "Relationship type: drug_protein"
+
+
+def test_legacy_semantic_cache_is_regenerated(tmp_path: Path, monkeypatch):
+    cache_path = tmp_path / "legacy-cache.pt"
+    torch.save({"rel": torch.ones(8)}, cache_path)
+
+    async def _fake_embed_async(client, texts, model="text-embedding-3-small"):
+        return [[0.5] * 16 for _ in texts]
+
+    fake_openai = types.ModuleType("openai")
+
+    class _FakeAsyncOpenAI:
+        pass
+
+    fake_openai.AsyncOpenAI = _FakeAsyncOpenAI
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+    monkeypatch.setattr(semantic_module, "_embed_async", _fake_embed_async)
+
+    rel_emb = relation_embeddings_from_relation_types(
+        ["rel"],
+        edge_dim=8,
+        cache_path=cache_path,
+        use_openai=True,
+    )
+
+    assert rel_emb["rel"].numel() == 16
+    saved = torch.load(cache_path)
+    assert saved["format_version"] == 2
+    assert saved["embedding_dim"] == 16
 
 
 def test_prepare_link_prediction_dataset_node_split_uses_held_out_nodes():

@@ -12,7 +12,10 @@ from kgml_new.data.datasets import (
     prepare_link_prediction_dataset,
 )
 from kgml_new.data.loaders import GraphCSVSpec, PRIMEKG_CSV_SPEC, load_graph_csv, load_pickled_graph
-from kgml_new.embeddings.semantic import build_relation_tensor
+from kgml_new.embeddings.semantic import (
+    build_relation_tensor,
+    relation_embeddings_from_graph,
+)
 from kgml_new.models.baseline_gcn import BaselineGCN
 from kgml_new.models.baseline_sage import BaselineGraphSAGE
 from kgml_new.models.edge_aware_sage import EdgeAwareGraphSAGE
@@ -34,7 +37,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--method",
-        choices=("baseline_sage", "baseline_gcn", "edge_aware_sage", "node2vec", "link_mlp"),
+        choices=(
+            "baseline_sage",
+            "baseline_gcn",
+            "edge_aware_sage",
+            "node2vec",
+            "link_mlp",
+            "edge_aware_link_mlp",
+        ),
         required=True,
     )
     parser.add_argument("--input", "--csv", dest="input_path", type=Path, default=Path("kg.csv"))
@@ -66,6 +76,24 @@ def parse_args() -> argparse.Namespace:
         "--shuffle-relations",
         action=argparse.BooleanOptionalAction,
         default=False,
+    )
+    parser.add_argument(
+        "--semantic",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="For edge-aware methods: use OpenAI semantic relation embeddings by default.",
+    )
+    parser.add_argument(
+        "--semantic-cache",
+        type=Path,
+        default=None,
+        help="Optional cache path for relation embeddings used by edge-aware methods.",
+    )
+    parser.add_argument(
+        "--strict-semantic",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Fail instead of falling back if OpenAI semantic embedding setup fails.",
     )
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
@@ -126,6 +154,26 @@ def history_dict(history) -> dict:
         "val_ap": history.val_ap,
         "batch_count": history.batch_count,
     }
+
+
+def build_edge_aware_relation_table(
+    *,
+    args: argparse.Namespace,
+    training_graph,
+    relation_lookup: dict[str, int],
+    edge_dim: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, str]:
+    rel_emb = relation_embeddings_from_graph(
+        training_graph,
+        edge_dim=edge_dim,
+        cache_path=args.semantic_cache,
+        use_openai=args.semantic,
+        strict_openai=args.strict_semantic,
+    )
+    relation_table = build_relation_tensor(rel_emb, relation_lookup, edge_dim, device)
+    relation_init = "openai_semantic" if args.semantic else "random"
+    return relation_table, relation_init
 
 
 def maybe_train_decoder(
@@ -190,6 +238,9 @@ def main() -> None:
         "negatives_per_pos": dataset.negatives_per_pos,
         "decoder": args.decoder,
         "shuffle_relations": args.shuffle_relations,
+        "semantic": args.semantic,
+        "semantic_cache": str(args.semantic_cache) if args.semantic_cache else None,
+        "strict_semantic": args.strict_semantic,
         "max_edges": args.max_edges,
         "in_dim": args.in_dim,
         "epochs": args.epochs,
@@ -323,8 +374,13 @@ def main() -> None:
     elif args.method == "edge_aware_sage":
         cfg = TrainConfig(epochs=args.epochs, seed=args.seed)
         edge_dim = cfg.edge_dim
-        rel_emb = {key: torch.randn(edge_dim) * 0.1 for key in relation_lookup}
-        relation_table = build_relation_tensor(rel_emb, relation_lookup, edge_dim, device)
+        relation_table, relation_init = build_edge_aware_relation_table(
+            args=args,
+            training_graph=dataset.graph,
+            relation_lookup=relation_lookup,
+            edge_dim=edge_dim,
+            device=device,
+        )
         model = EdgeAwareGraphSAGE(
             cfg.in_dim,
             edge_dim,
@@ -379,6 +435,7 @@ def main() -> None:
             query_buckets=test_query_buckets,
         )
         output["train_embedding_shape"] = list(z.shape)
+        output["relation_init"] = relation_init
         output["last_epoch"] = last_epoch
         output["history"] = history_dict(history)
         if decoder_history is not None:
@@ -410,7 +467,7 @@ def main() -> None:
             output["metrics"] = output["test_metrics"]
             output["comparable_under_node_split"] = True
 
-    else:
+    elif args.method == "link_mlp":
         base_cfg = TrainConfig(epochs=args.epochs, seed=args.seed)
         base_model = BaselineGraphSAGE(
             base_cfg.in_dim,
@@ -465,6 +522,80 @@ def main() -> None:
             negatives_per_pos=dataset.negatives_per_pos,
             device=device,
             edge_aware=False,
+            num_neighbors=base_cfg.num_neighbors,
+            decoder="mlp",
+            decoder_model=mlp,
+            query_buckets=test_query_buckets,
+        )
+        output["metrics"] = output["test_metrics"]
+
+    else:
+        base_cfg = TrainConfig(epochs=args.epochs, seed=args.seed)
+        edge_dim = base_cfg.edge_dim
+        relation_table, relation_init = build_edge_aware_relation_table(
+            args=args,
+            training_graph=dataset.graph,
+            relation_lookup=relation_lookup,
+            edge_dim=edge_dim,
+            device=device,
+        )
+        base_model = EdgeAwareGraphSAGE(
+            base_cfg.in_dim,
+            edge_dim,
+            base_cfg.hidden_dim,
+            base_cfg.out_dim,
+            relation_table=relation_table,
+            num_layers=base_cfg.num_layers,
+            dropout=base_cfg.dropout,
+            concat=base_cfg.concat,
+        )
+        base_model, base_last_epoch, base_history = train_unsupervised_batched(
+            base_model,
+            train_data,
+            train_pos,
+            base_cfg,
+            device=device,
+            edge_aware=True,
+        )
+        z = compute_node_embeddings(base_model, train_data, device, edge_aware=True).detach()
+        mlp_cfg = LinkMLPConfig(
+            epochs=args.epochs,
+            seed=args.seed,
+            feature_mode="concat_product",
+        )
+        mlp, last_epoch, history = train_link_mlp_with_validation(
+            z,
+            train_pos,
+            mlp_cfg,
+            device=device,
+        )
+        output["train_embedding_shape"] = list(z.shape)
+        output["relation_init"] = relation_init
+        output["last_epoch"] = last_epoch
+        output["history"] = history_dict(history)
+        output["base_embedding_history"] = history_dict(base_history)
+        output["base_last_epoch"] = base_last_epoch
+        output["val_metrics"] = evaluate_inductive_link_prediction(
+            base_model,
+            dataset.full_data,
+            pos_edge_index=val_pos,
+            neg_edge_index=val_neg,
+            negatives_per_pos=dataset.negatives_per_pos,
+            device=device,
+            edge_aware=True,
+            num_neighbors=base_cfg.num_neighbors,
+            decoder="mlp",
+            decoder_model=mlp,
+            query_buckets=val_query_buckets,
+        )
+        output["test_metrics"] = evaluate_inductive_link_prediction(
+            base_model,
+            dataset.full_data,
+            pos_edge_index=test_pos,
+            neg_edge_index=test_neg,
+            negatives_per_pos=dataset.negatives_per_pos,
+            device=device,
+            edge_aware=True,
             num_neighbors=base_cfg.num_neighbors,
             decoder="mlp",
             decoder_model=mlp,

@@ -77,6 +77,33 @@ def test_edge_aware_differs_from_zero_relations():
     assert not torch.allclose(z_sem, z_zero, atol=1e-5)
 
 
+def test_edge_aware_projects_full_relation_table_to_edge_space():
+    data, relation_lookup = _toy_data()
+    device = torch.device("cpu")
+    relation_input_dim = 24
+    edge_dim = 8
+
+    rel_emb = {k: torch.randn(relation_input_dim) * 0.1 for k in relation_lookup}
+    rt = build_relation_tensor(rel_emb, relation_lookup, edge_dim, device)
+
+    m = EdgeAwareGraphSAGE(
+        in_channels=16,
+        edge_dim=edge_dim,
+        hidden_channels=8,
+        out_channels=16,
+        relation_table=rt,
+        num_layers=2,
+        dropout=0.0,
+        concat=True,
+    )
+    z = m(data.x, data.edge_index, data.edge_attr)
+
+    assert rt.shape[1] == relation_input_dim
+    assert m.relation_input_dim == relation_input_dim
+    assert m.edge_dim == edge_dim
+    assert z.shape == (data.num_nodes, 16)
+
+
 def _get_primekg_path() -> Path:
     import pytest
 

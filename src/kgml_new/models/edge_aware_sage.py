@@ -45,6 +45,14 @@ class EdgeAwareGraphSAGE(nn.Module):
         self.concat = concat
         self.normalize_output = normalize_output
         self.relation_table = nn.Parameter(relation_table, requires_grad=False)
+        relation_input_dim = int(relation_table.size(-1))
+        self.relation_input_dim = relation_input_dim
+        self.edge_dim = edge_dim
+        self.relation_projection = (
+            nn.Linear(relation_input_dim, edge_dim, bias=False)
+            if relation_input_dim != edge_dim
+            else nn.Identity()
+        )
 
         self.layers = nn.ModuleList()
         if num_layers <= 1:
@@ -58,7 +66,7 @@ class EdgeAwareGraphSAGE(nn.Module):
         self.post = SAGEConv(out_channels, out_channels, aggr="mean", normalize=False)
 
     def forward(self, x: Tensor, edge_index: Adj, edge_attr: Tensor) -> Tensor:
-        rel = self.relation_table[edge_attr]
+        rel = self.relation_projection(self.relation_table[edge_attr])
         h = x
         for i, layer in enumerate(self.layers):
             h = layer(h, edge_index, rel)

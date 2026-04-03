@@ -125,7 +125,7 @@ def main() -> None:
     else:
         if args.semantic:
             rel_emb = relation_embeddings_from_graph(
-                g,
+                dataset.graph,
                 edge_dim=cfg.edge_dim,
                 cache_path=args.cache,
                 use_openai=True,

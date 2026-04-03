@@ -23,12 +23,16 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-Optional semantic relation embeddings for the pickle-only edge-aware runner:
+Optional semantic relation embeddings for edge-aware runners:
 
 ```bash
 pip install -e ".[semantic]"
 export OPENAI_API_KEY=...
 ```
+
+Semantic prompts use `relation_glossary.tsv` for DRKG-style sourced predicates and fall back to the raw relation string otherwise. PrimeKG-style labels stay raw unless you add a separate PrimeKG glossary.
+Semantic caches keep the full OpenAI embedding width; the edge-aware model learns a projection into the configured message-space `edge_dim`.
+Legacy semantic caches saved before the full-width change are automatically regenerated when reused.
 
 ## Supported Inputs
 
@@ -106,6 +110,7 @@ Methods:
 - `edge_aware_sage`
 - `node2vec`
 - `link_mlp`
+- `edge_aware_link_mlp`
 
 ### Common commands
 
@@ -160,8 +165,19 @@ Edge-aware GraphSAGE:
   --method edge_aware_sage \
   --input kg.csv \
   --split-protocol node \
+  --semantic \
+  --semantic-cache cache/primekg-edge-aware-semantic.pt \
   --epochs 200 \
   --output results/edge_aware_sage-node.json
+```
+
+Precompute a DRKG glossary-first relation cache once and reuse it:
+
+```bash
+.venv/bin/python -m kgml_new.scripts.generate_relation_embeddings \
+  --input drkg.tsv \
+  --output cache/drkg-relations.pt \
+  --semantic
 ```
 
 Node2Vec:
@@ -201,6 +217,9 @@ Link MLP scorer:
 - `--negatives-per-pos`: number of negatives per positive in validation/test
 - `--decoder {dot,mlp}`: link scoring head
 - `--shuffle-relations`: relation-label ablation
+- `--semantic` / `--no-semantic`: use OpenAI semantic relation embeddings or random relation embeddings for edge-aware methods
+- `--semantic-cache`: cache file for relation embeddings
+- `--strict-semantic`: fail instead of silently falling back if semantic embedding setup fails
 - `--epochs`
 - `--seed`
 - `--in-dim`
@@ -221,8 +240,9 @@ Link MLP scorer:
 `edge_aware_sage`
 
 - relation-aware message passing
-- in `run_gpu_method`, relation embeddings are random learned tables initialized in-code
-- in `run_link_prediction`, the edge-aware pickle-only path can optionally use OpenAI semantic embeddings
+- defaults to OpenAI semantic relation embeddings in both `run_gpu_method` and `run_link_prediction`
+- use `--no-semantic` for the random-initialized ablation
+- semantic prompts use `relation_glossary.tsv` for DRKG-style sourced predicates and fall back to raw relation strings otherwise
 
 `node2vec`
 
@@ -234,6 +254,12 @@ Link MLP scorer:
 
 - trains a baseline GraphSAGE encoder first
 - then trains an MLP scorer on pair features
+
+`edge_aware_link_mlp`
+
+- trains an edge-aware GraphSAGE encoder first
+- then trains an MLP scorer on pair features
+- use this when you want to separate "better encoder" from "better decoder" while keeping relation-aware message passing
 
 ## Pickled Graph Runner
 
@@ -283,6 +309,45 @@ Important arguments:
 - `--epochs`
 - `--seed`
 - `--out`
+
+## Relation Embedding Cache Generator
+
+Entry point:
+
+```bash
+python -m kgml_new.scripts.generate_relation_embeddings --help
+```
+
+This script creates the cached relation embedding table used by the edge-aware semantic runners.
+
+Example for DRKG:
+
+```bash
+.venv/bin/python -m kgml_new.scripts.generate_relation_embeddings \
+  --input drkg.tsv \
+  --output cache/drkg-relations.pt \
+  --semantic
+```
+
+Example for PrimeKG:
+
+```bash
+.venv/bin/python -m kgml_new.scripts.generate_relation_embeddings \
+  --input kg.csv \
+  --output cache/primekg-relations.pt \
+  --semantic
+```
+
+Important arguments:
+
+- `--input`: CSV, TSV, or pickle path
+- `--input-format {auto,csv,pickle}`
+- `--output`: `.pt` cache file to create
+- `--edge-dim`: embedding width for random relation caches; semantic caches keep full OpenAI width
+- `--max-edges`: useful for smoke tests
+- `--semantic` / `--no-semantic`
+- `--strict-semantic`
+- `--glossary-path`: override the default DRKG relation glossary path
 
 ## TxGNN Experiments
 
@@ -394,6 +459,7 @@ For the main link-prediction study, run:
 2. `baseline_gcn` with `--split-protocol node`
 3. `edge_aware_sage` with `--split-protocol node`
 4. `link_mlp` with `--split-protocol node`
+5. `edge_aware_link_mlp` with `--split-protocol node`
 
 Optional baselines:
 
