@@ -25,22 +25,23 @@ The repo is intended to work with:
 
 ## Ground Truth Files To Trust
 
-When in doubt, trust these files first:
+When in doubt, trust these files first (paths are relative to the repository root):
 
-- [README.md](/Users/sahilkapadia/development/kgml/kgml_new/README.md)
-- [EXPERIMENTS.md](/Users/sahilkapadia/development/kgml/kgml_new/EXPERIMENTS.md)
-- [src/kgml_new/scripts/run_gpu_method.py](/Users/sahilkapadia/development/kgml/kgml_new/src/kgml_new/scripts/run_gpu_method.py)
-- [src/kgml_new/scripts/run_txgnn.py](/Users/sahilkapadia/development/kgml/kgml_new/src/kgml_new/scripts/run_txgnn.py)
-- [src/kgml_new/scripts/run_link_prediction.py](/Users/sahilkapadia/development/kgml/kgml_new/src/kgml_new/scripts/run_link_prediction.py)
-- [src/kgml_new/scripts/run_node_classification.py](/Users/sahilkapadia/development/kgml/kgml_new/src/kgml_new/scripts/run_node_classification.py)
-- [src/kgml_new/embeddings/semantic.py](/Users/sahilkapadia/development/kgml/kgml_new/src/kgml_new/embeddings/semantic.py)
-- [src/kgml_new/config.py](/Users/sahilkapadia/development/kgml/kgml_new/src/kgml_new/config.py)
-- [src/kgml_new/data/loaders.py](/Users/sahilkapadia/development/kgml/kgml_new/src/kgml_new/data/loaders.py)
-- [src/kgml_new/data/relations.py](/Users/sahilkapadia/development/kgml/kgml_new/src/kgml_new/data/relations.py)
+- [README.md](README.md)
+- [EXPERIMENTS.md](EXPERIMENTS.md)
+- [src/kgml_new/scripts/run_gpu_method.py](src/kgml_new/scripts/run_gpu_method.py)
+- [src/kgml_new/scripts/run_txgnn.py](src/kgml_new/scripts/run_txgnn.py)
+- [src/kgml_new/scripts/run_link_prediction.py](src/kgml_new/scripts/run_link_prediction.py)
+- [src/kgml_new/scripts/run_node_classification.py](src/kgml_new/scripts/run_node_classification.py)
+- [src/kgml_new/scripts/generate_relation_embeddings.py](src/kgml_new/scripts/generate_relation_embeddings.py)
+- [src/kgml_new/embeddings/semantic.py](src/kgml_new/embeddings/semantic.py)
+- [src/kgml_new/config.py](src/kgml_new/config.py)
+- [src/kgml_new/data/loaders.py](src/kgml_new/data/loaders.py)
+- [src/kgml_new/data/relations.py](src/kgml_new/data/relations.py)
 
 ## Environment And Setup
 
-Python packaging is defined in [pyproject.toml](/Users/sahilkapadia/development/kgml/kgml_new/pyproject.toml).
+Python packaging is defined in [pyproject.toml](pyproject.toml).
 
 Core dependencies:
 
@@ -77,12 +78,13 @@ If semantic relation embeddings are used, `OPENAI_API_KEY` must be present. The 
 
 Important files and directories in this repo:
 
-- [kg.csv](/Users/sahilkapadia/development/kgml/kgml_new/kg.csv): PrimeKG-style CSV
-- [drkg.tsv](/Users/sahilkapadia/development/kgml/kgml_new/drkg.tsv): DRKG edge list TSV
-- [relation_glossary.tsv](/Users/sahilkapadia/development/kgml/kgml_new/relation_glossary.tsv): glossary used for DRKG-style sourced predicates
-- [cache](/Users/sahilkapadia/development/kgml/kgml_new/cache): relation embedding caches
-- [results](/Users/sahilkapadia/development/kgml/kgml_new/results): experiment outputs if created
-- [scripts/slurm](/Users/sahilkapadia/development/kgml/kgml_new/scripts/slurm): SLURM launch scripts
+- [kg.csv](kg.csv): PrimeKG-style CSV
+- [drkg.tsv](drkg.tsv): DRKG edge list TSV
+- [relation_glossary.tsv](relation_glossary.tsv): glossary used for DRKG-style sourced predicates
+- [cache](cache): relation embedding caches
+- [results](results): experiment outputs if created
+- [scripts/slurm](scripts/slurm): SLURM launch scripts
+- [data/drkg-shuffled-seed42.tsv](data/drkg-shuffled-seed42.tsv): reproducible shuffled DRKG subset helper
 
 ## Main Experiment Entry Points
 
@@ -90,7 +92,7 @@ Important files and directories in this repo:
 
 Primary entry point for generic link prediction experiments:
 
-- [src/kgml_new/scripts/run_gpu_method.py](/Users/sahilkapadia/development/kgml/kgml_new/src/kgml_new/scripts/run_gpu_method.py)
+- [src/kgml_new/scripts/run_gpu_method.py](src/kgml_new/scripts/run_gpu_method.py)
 
 Use this for almost all standard method comparisons.
 
@@ -144,7 +146,7 @@ Canonical examples:
 
 Typed heterogeneous KG runner:
 
-- [src/kgml_new/scripts/run_txgnn.py](/Users/sahilkapadia/development/kgml/kgml_new/src/kgml_new/scripts/run_txgnn.py)
+- [src/kgml_new/scripts/run_txgnn.py](src/kgml_new/scripts/run_txgnn.py)
 
 Use this when typed nodes and typed edges matter and you want the TxGNN-style setup.
 
@@ -162,7 +164,7 @@ Example:
 
 Legacy pickle-only link prediction runner:
 
-- [src/kgml_new/scripts/run_link_prediction.py](/Users/sahilkapadia/development/kgml/kgml_new/src/kgml_new/scripts/run_link_prediction.py)
+- [src/kgml_new/scripts/run_link_prediction.py](src/kgml_new/scripts/run_link_prediction.py)
 
 Only accepts pickled `networkx.Graph` input.
 
@@ -170,7 +172,7 @@ Only accepts pickled `networkx.Graph` input.
 
 Node classification runner:
 
-- [src/kgml_new/scripts/run_node_classification.py](/Users/sahilkapadia/development/kgml/kgml_new/src/kgml_new/scripts/run_node_classification.py)
+- [src/kgml_new/scripts/run_node_classification.py](src/kgml_new/scripts/run_node_classification.py)
 
 Only accepts pickled `networkx.Graph` input.
 
@@ -178,24 +180,38 @@ For `edge_sage`, node classification now shares the same semantic/random/cache r
 
 ### 5. `generate_relation_embeddings`
 
-Precompute semantic or random relation caches:
+Precompute relation embedding caches (OpenAI, SapBERT, or random):
 
-- [src/kgml_new/scripts/generate_relation_embeddings.py](/Users/sahilkapadia/development/kgml/kgml_new/src/kgml_new/scripts/generate_relation_embeddings.py)
+- [src/kgml_new/scripts/generate_relation_embeddings.py](src/kgml_new/scripts/generate_relation_embeddings.py)
 
-This is important for reproducible edge-aware runs and for avoiding repeated OpenAI embedding calls.
+This is important for reproducible edge-aware runs and for avoiding repeated API calls.
 
-Example:
+**This script does not take `--semantic`.** Choose the backend with `--embedding-model {openai,sapbert,random}` (see `--help`). OpenAI requires `[semantic]` extras and `OPENAI_API_KEY`.
+
+Example (OpenAI):
 
 ```bash
 .venv/bin/python -m kgml_new.scripts.generate_relation_embeddings \
   --input drkg.tsv \
   --output cache/drkg-relations.pt \
-  --semantic
+  --embedding-model openai
+```
+
+Example (random baseline cache):
+
+```bash
+.venv/bin/python -m kgml_new.scripts.generate_relation_embeddings \
+  --input drkg.tsv \
+  --output cache/drkg-relations-random.pt \
+  --embedding-model random \
+  --edge-dim 32
 ```
 
 ## Input Formats And How Loading Works
 
-The graph-loading logic lives in [src/kgml_new/data/loaders.py](/Users/sahilkapadia/development/kgml/kgml_new/src/kgml_new/data/loaders.py).
+The graph-loading logic lives in [src/kgml_new/data/loaders.py](src/kgml_new/data/loaders.py).
+
+`run_gpu_method` builds `GraphCSVSpec` from CLI columns but still pins several PrimeKG-oriented fields (IDs, `node_type_attr`, `relation_attr`, `edge_attr_cols`) from `PRIMEKG_CSV_SPEC`. If you add a new dataset that needs different edge attributes or IDs, extend the loader/CLI in code and **update this file and EXPERIMENTS.md** so the next agent does not assume PrimeKG-only behavior.
 
 ### Supported input types
 
@@ -315,13 +331,15 @@ Supported link scoring decoders:
 
 - relation-aware GraphSAGE
 - per-edge message uses relation information
-- supports semantic relation embeddings or random relation embeddings
+- supports OpenAI, SapBERT, or random relation tables via `--embedding-model` (with `--semantic` / `--no-semantic` controlling defaults)
+- optional `--semantic-alignment-lambda` regularizer when using `basis_mixture` with semantic embeddings (builds a similarity matrix from relation text; see `run_gpu_method.py`)
 
 ### `node2vec`
 
 - transductive embedding baseline
 - not a main comparable method under node split
 - only meaningfully comparable under edge split
+- PyG’s `Node2Vec` may require `pyg-lib` or `torch-cluster`; without them the code uses an internal lightweight trainer (see `training/node2vec_train.py`)
 
 ### `link_mlp`
 
@@ -338,7 +356,16 @@ Supported link scoring decoders:
 
 ## Semantic Relation Embeddings
 
-Semantic logic lives in [src/kgml_new/embeddings/semantic.py](/Users/sahilkapadia/development/kgml/kgml_new/src/kgml_new/embeddings/semantic.py).
+Semantic logic lives in [src/kgml_new/embeddings/semantic.py](src/kgml_new/embeddings/semantic.py).
+
+### Python API contract (do not regress)
+
+These entry points take **`embedding_model`** (`"openai"`, `"sapbert"`, or `"random"`) and **`strict_embedding`**, not legacy `use_openai` / `strict_openai`:
+
+- `relation_embeddings_from_graph`
+- `relation_embeddings_from_relation_types`
+
+Call sites to keep in sync when refactoring: `run_gpu_method.py`, `generate_relation_embeddings.py`, `run_link_prediction.py`, `training/node_classification.py` (`edge_sage`), and tests under `tests/`.
 
 ### Default model
 
@@ -348,7 +375,7 @@ Async OpenAI embeddings call:
 
 ### Prompt construction
 
-For DRKG-style sourced predicates containing `::`, the system tries to use [relation_glossary.tsv](/Users/sahilkapadia/development/kgml/kgml_new/relation_glossary.tsv).
+For DRKG-style sourced predicates containing `::`, the system tries to use [relation_glossary.tsv](relation_glossary.tsv).
 
 Prompt fields may include:
 
@@ -366,14 +393,17 @@ For PrimeKG-style labels such as `drug_protein`, there is no DRKG glossary match
 
 ### Cache format
 
-Caches are written with:
+Caches written by `relation_embeddings_from_relation_types` / `relation_embeddings_from_graph` include (among others):
 
-- `format_version`
-- `use_openai`
+- `format_version` (current writes use version **4**)
+- `embedding_model` (`openai`, `sapbert`, or `random`)
+- `relation_text_mode` (`raw` or `canonical`)
+- `sapbert_model` (when applicable)
+- `use_openai` (boolean mirror of `embedding_model == "openai"`, for older readers)
 - `embedding_dim`
-- `embeddings`
+- `embeddings` (dict of relation string → `torch.Tensor`)
 
-Current semantic caches keep the full OpenAI embedding width. The edge-aware model learns a projection into message-space `edge_dim`.
+Semantic caches keep the **full** embedding model width. The edge-aware model learns a projection into message-space `edge_dim`.
 
 ### Legacy cache behavior
 
@@ -387,17 +417,21 @@ Without `--strict-semantic`, semantic failures fall back to random relation embe
 
 ## Edge-Aware Model Details That Matter For Interpretation
 
-The implementation is in [src/kgml_new/models/edge_aware_sage.py](/Users/sahilkapadia/development/kgml/kgml_new/src/kgml_new/models/edge_aware_sage.py).
+The implementation is in [src/kgml_new/models/edge_aware_sage.py](src/kgml_new/models/edge_aware_sage.py).
 
 Important details:
 
 - `relation_table` is stored as an `nn.Parameter(..., requires_grad=False)`
 - the raw relation embeddings are frozen
 - if the relation input width differs from `edge_dim`, the model learns a projection layer
-- there are now three edge-aware relation-control modes:
-  - `concat`: projected relation embedding is concatenated with `x_j`
+- **Backbone parity with baseline GraphSAGE:** each edge-aware layer applies **mean aggregated neighbor messages plus a learned root (self) transform** `out = agg(m(x_j, r)) + W_root x`, mirroring PyG `SAGEConv`’s `lin_l(mean(neighbors)) + lin_r(self)`. With **no incident edges**, the neighbor term is zero and the node still receives `W_root x`, matching isolated-node behavior of the baseline.
+- **Relation-aware readout:** the final hop is the **same relation-control family** as the main stack (concat / gated / basis_mixture / FiLM), not a relation-blind `SAGEConv`, so relation signal is preserved through the last layer before L2 normalization.
+- **Basis mixture** uses a batched `einsum` over basis weight stacks for better GPU throughput than per-basis `Linear` calls in a Python loop.
+- Edge-aware relation-control modes (select via `--edge-relation-mode`; `film` is also exposed on the CLI):
+  - `concat`: projected relation embedding is concatenated with `x_j` before the message MLP (`--concat` / `--no-concat` in `run_gpu_method` only applies here)
   - `gated`: projected relation embedding produces a sigmoid gate over the learned neighbor message
   - `basis_mixture`: projected relation embedding produces mixture weights over `K` shared basis message transforms
+  - `film`: FiLM-style scale and shift on the neighbor message from the relation embedding
 - therefore a run with semantic relation embeddings is usually:
   - frozen semantic table
   - learned projection into edge message space
@@ -409,7 +443,7 @@ This means "semantic vs random" is not the same as "fully frozen relation featur
 
 ## Default Training Hyperparameters
 
-Defaults live in [src/kgml_new/config.py](/Users/sahilkapadia/development/kgml/kgml_new/src/kgml_new/config.py).
+Defaults live in [src/kgml_new/config.py](src/kgml_new/config.py).
 
 ### `TrainConfig`
 
@@ -495,19 +529,19 @@ Better options:
 - stratify by relation
 - shuffle the file once, then take the first 25k rows
 
-A reproducible shuffle file is now present in this repo:
+A reproducible shuffle file is present in this repo:
 
-- [data/drkg-shuffled-seed42.tsv](/Users/sahilkapadia/development/kgml/kgml_new/data/drkg-shuffled-seed42.tsv)
+- [data/drkg-shuffled-seed42.tsv](data/drkg-shuffled-seed42.tsv)
 
 ## Existing Caches And Their Meanings
 
 At the time this file was written, the repo has used these cache names:
 
-- [cache/drkg-relations.pt](/Users/sahilkapadia/development/kgml/kgml_new/cache/drkg-relations.pt): full DRKG relation cache
-- [cache/primekg-relations.pt](/Users/sahilkapadia/development/kgml/kgml_new/cache/primekg-relations.pt): PrimeKG relation cache
-- [cache/drkg-relations-5k.pt](/Users/sahilkapadia/development/kgml/kgml_new/cache/drkg-relations-5k.pt): first-5k-row DRKG relation cache
-- [cache/drkg-relations-25k-semantic.pt](/Users/sahilkapadia/development/kgml/kgml_new/cache/drkg-relations-25k-semantic.pt): semantic cache used for the 25k-row edge-aware experiments
-- [cache/drkg-shuffled-seed42-relations-25k-semantic.pt](/Users/sahilkapadia/development/kgml/kgml_new/cache/drkg-shuffled-seed42-relations-25k-semantic.pt): semantic cache used for the shuffled 25k-row DRKG experiment
+- [cache/drkg-relations.pt](cache/drkg-relations.pt): full DRKG relation cache
+- [cache/primekg-relations.pt](cache/primekg-relations.pt): PrimeKG relation cache
+- [cache/drkg-relations-5k.pt](cache/drkg-relations-5k.pt): first-5k-row DRKG relation cache
+- [cache/drkg-relations-25k-semantic.pt](cache/drkg-relations-25k-semantic.pt): semantic cache used for the 25k-row edge-aware experiments
+- [cache/drkg-shuffled-seed42-relations-25k-semantic.pt](cache/drkg-shuffled-seed42-relations-25k-semantic.pt): semantic cache used for the shuffled 25k-row DRKG experiment
 
 Do not assume a cache name implies good relation diversity. Check the underlying slice logic.
 
@@ -531,7 +565,7 @@ Interpretation caveat:
 
 Recent shuffled-slice experiments also used:
 
-- first 25k rows of [data/drkg-shuffled-seed42.tsv](/Users/sahilkapadia/development/kgml/kgml_new/data/drkg-shuffled-seed42.tsv)
+- first 25k rows of [data/drkg-shuffled-seed42.tsv](data/drkg-shuffled-seed42.tsv)
 - 99 relation types in that slice
 - `edge_aware_sage`
 - `split-protocol node`
@@ -618,7 +652,7 @@ This is a much more meaningful semantic-vs-random comparison than the original s
 .venv/bin/python -m kgml_new.scripts.generate_relation_embeddings \
   --input drkg.tsv \
   --output cache/drkg-relations.pt \
-  --semantic
+  --embedding-model openai
 ```
 
 ### TxGNN
@@ -664,9 +698,14 @@ For `run_gpu_method`, the most important flags are:
 - `--decoder {dot,mlp}`
 - `--shuffle-relations`
 - `--semantic` or `--no-semantic`
+- `--embedding-model {openai,sapbert,random}`
 - `--semantic-cache`
+- `--glossary-path`
+- `--sapbert-model`
 - `--strict-semantic`
-- `--edge-relation-mode {concat,gated,basis_mixture}`
+- `--semantic-alignment-lambda` (basis_mixture + semantic)
+- `--edge-relation-mode {concat,gated,basis_mixture,film}`
+- `--concat` / `--no-concat` (only affects `concat` mode message construction)
 - `--num-relation-bases`
 - `--epochs`
 - `--seed`
@@ -727,7 +766,7 @@ When running experiments, always record:
 - whether input was a prefix slice, random sample, or stratified sample
 - split protocol
 - negative sampling mode
-- semantic or random relation initialization
+- semantic vs random vs SapBERT (`--embedding-model`, `--semantic`)
 - semantic cache path
 - epoch count
 - seed
@@ -761,6 +800,18 @@ Before interpreting results, verify:
 - semantic-vs-random comparison is weaker when the slice has only one relation type
 - current semantic setup freezes the raw relation table but still learns a projection layer
 - `node2vec` is not a fair main baseline under node-disjoint evaluation
+
+## Documentation And Verification Obligations (for agents and contributors)
+
+When you change **CLI flags**, **cache layout**, **split behavior**, or **embedding APIs**:
+
+1. Update [EXPERIMENTS.md](EXPERIMENTS.md) if users need new commands, flags, or procedural steps.
+2. Update [README.md](README.md) if install paths, one-liner examples, or high-level scope change.
+3. Update **this file** ([AGENTS.md](AGENTS.md)) if behavior affects interpretation of results, caches, or agent workflows.
+4. Run `pip install -e ".[dev]"` and `python -m pytest tests/`; fix or extend tests when contracts change.
+5. Run at least one `run_gpu_method` smoke (e.g. DRKG `--max-edges 1000 --epochs 1`) after non-trivial training or loader edits.
+
+Do **not** document `generate_relation_embeddings` with a `--semantic` flag; that script uses `--embedding-model`.
 
 ## If You Need To Extend The Repo
 

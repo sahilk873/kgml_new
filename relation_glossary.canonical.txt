@@ -1,0 +1,197 @@
+DGIDB::ACTIVATOR::Gene:Compound	A compound increases the activity or function of a gene product.
+
+DGIDB::AGONIST::Gene:Compound	A compound activates a gene product.
+
+DGIDB::ALLOSTERIC MODULATOR::Gene:Compound	A compound modulates the function of a gene product.
+
+DGIDB::ANTAGONIST::Gene:Compound	A compound blocks or inhibits a gene product.
+
+DGIDB::ANTIBODY::Gene:Compound	A compound an antibody interaction occurs when an antibody drug specifically binds the target molecule.
+
+DGIDB::BLOCKER::Gene:Compound	A compound blocks or inhibits a gene product.
+
+DGIDB::INHIBITOR::Gene:Compound	A compound decreases the activity or function of a gene product.
+
+DGIDB::OTHER::Gene:Compound	A compound this is a label given by the reporting source to an interaction that doesn t belong to other interac....
+
+DGIDB::PARTIAL AGONIST::Gene:Compound	A compound partially activates a gene product.
+
+DGIDB::POSITIVE ALLOSTERIC MODULATOR::Gene:Compound	A compound increases the activity or function of a gene product.
+
+DRUGBANK::carrier::Compound:Gene	A compound is a carrier for a gene product.
+
+DRUGBANK::ddi-interactor-in::Compound:Compound	A compound interacts with a compound.
+
+DRUGBANK::enzyme::Compound:Gene	A compound is an enzyme for a gene product.
+
+DRUGBANK::target::Compound:Gene	A compound is a target of a gene product.
+
+DRUGBANK::treats::Compound:Disease	A compound we extract the associated conditions related to compound entities in the drugbank.
+
+DRUGBANK::x-atc::Compound:Atc	A atc we extend the hierarchical atc classification information of drugs from their corresponding atc code....
+
+GNBR::A+::Compound:Gene	A compound agonism, activation a gene product.
+
+GNBR::A-::Compound:Gene	A compound antagonism, blocking a gene product.
+
+GNBR::B::Compound:Gene	A compound binds to a gene product.
+
+GNBR::B::Gene:Gene	A gene product binds to a gene product.
+
+GNBR::C::Compound:Disease	A compound inhibits cell growth (esp. cancers) a disease.
+
+GNBR::D::Gene:Disease	A disease drug targets a gene product.
+
+GNBR::E+::Compound:Gene	A compound increases expression of a gene product.
+
+GNBR::E+::Gene:Gene	A gene product increases expression of a gene product.
+
+GNBR::E-::Compound:Gene	A compound decreases expression of a gene product.
+
+GNBR::E::Compound:Gene	A compound modulates the function of a gene product.
+
+GNBR::E::Gene:Gene	A gene product modulates the function of a gene product.
+
+GNBR::G::Gene:Disease	A disease promotes progression a gene product.
+
+GNBR::H::Gene:Gene	A gene product is part of the same complex as a gene product.
+
+GNBR::I::Gene:Gene	A gene product participates in a signaling pathway.
+
+GNBR::J::Compound:Disease	A compound role in disease pathogenesis a disease.
+
+GNBR::J::Gene:Disease	A disease role in pathogenesis a gene product.
+
+GNBR::K::Compound:Gene	A compound metabolism, pharmacokinetics a gene product.
+
+GNBR::L::Gene:Disease	A disease improper regulation linked to disease a gene product.
+
+GNBR::Md::Gene:Disease	A disease biomarkers (diagnostic) a gene product.
+
+GNBR::Mp::Compound:Disease	A compound biomarkers (of disease progression) a disease.
+
+GNBR::N::Compound:Gene	A compound decreases the activity or function of a gene product.
+
+GNBR::O::Compound:Gene	A compound transport, channels a gene product.
+
+GNBR::Pa::Compound:Disease	A compound alleviates, reduces a disease.
+
+GNBR::Pr::Compound:Disease	A compound prevents, suppresses a disease.
+
+GNBR::Q::Gene:Gene	A gene product production by cell population a gene product.
+
+GNBR::Rg::Gene:Gene	A gene product regulates a gene product.
+
+GNBR::Sa::Compound:Disease	A compound side effect/adverse event a disease.
+
+GNBR::T::Compound:Disease	A compound treatment/therapy (including investigatory) a disease.
+
+GNBR::Te::Gene:Disease	A disease possible therapeutic effect a gene product.
+
+GNBR::U::Gene:Disease	A disease causal mutations a gene product.
+
+GNBR::Ud::Gene:Disease	A disease mutations affecting disease course a gene product.
+
+GNBR::V+::Gene:Gene	A gene product activates, stimulates a gene product.
+
+GNBR::W::Gene:Gene	A gene product enhances response a gene product.
+
+GNBR::X::Gene:Disease	A disease overexpression in disease a gene product.
+
+GNBR::Y::Gene:Disease	A disease polymorphisms alter risk a gene product.
+
+GNBR::Z::Compound:Gene	A compound enzyme activity a gene product.
+
+GNBR::in_tax::Gene:Tax	A gene product gene belongs to taxonomy a tax.
+
+Hetionet::AdG::Anatomy:Gene	A anatomical location downregulatation a gene product.
+
+Hetionet::AeG::Anatomy:Gene	A anatomical location affects expression of a gene product.
+
+Hetionet::AuG::Anatomy:Gene	A gene product is upregulated in a anatomical location.
+
+Hetionet::CbG::Compound:Gene	A compound binds to a gene product.
+
+Hetionet::CcSE::Compound:Side Effect	A compound causes a side effect.
+
+Hetionet::CdG::Compound:Gene	A gene product is downregulated in a compound.
+
+Hetionet::CpD::Compound:Disease	A compound palliates a disease.
+
+Hetionet::CrC::Compound:Compound	A compound resembles a compound.
+
+Hetionet::CtD::Compound:Disease	A compound treats a disease.
+
+Hetionet::CuG::Compound:Gene	A gene product is upregulated in a compound.
+
+Hetionet::DaG::Disease:Gene	A disease associates with a gene product.
+
+Hetionet::DdG::Disease:Gene	A gene product is downregulated in a disease.
+
+Hetionet::DlA::Disease:Anatomy	A anatomical location localizes to a disease.
+
+Hetionet::DpS::Disease:Symptom	A disease presents a symptom.
+
+Hetionet::DrD::Disease:Disease	A diisease resembles a disease.
+
+Hetionet::DuG::Disease:Gene	A gene product is upregulated in a disease.
+
+Hetionet::GcG::Gene:Gene	A gene product covaries with a gene product.
+
+Hetionet::GiG::Gene:Gene	A gene product interaction a gene product.
+
+Hetionet::GpBP::Gene:Biological Process	A biological process participates in a gene product.
+
+Hetionet::GpCC::Gene:Cellular Component	A cellular component participates in a gene product.
+
+Hetionet::GpMF::Gene:Molecular Function	A gene product participates in a molecular function.
+
+Hetionet::GpPW::Gene:Pathway	A gene product participates in a pathway.
+
+Hetionet::Gr>G::Gene:Gene	A gene product regulates a gene product.
+
+Hetionet::PCiC::Pharmacologic Class:Compound	A compound inclusion a pharmacologic class.
+
+INTACT::ASSOCIATION::Compound:Gene	A compound associates with a gene product.
+
+INTACT::ASSOCIATION::Gene:Gene	A gene product associates with a gene product.
+
+INTACT::CLEAVAGE REACTION::Gene:Gene	An enzyme cleaves a gene product.
+
+INTACT::COLOCALIZATION::Gene:Gene	A gene product coincident occurrence of molecules in a given subcellular fraction observed with a low resolution me....
+
+INTACT::DEPHOSPHORYLATION REACTION::Gene:Gene	An enzyme dephosphorylates a gene product.
+
+INTACT::DIRECT INTERACTION::Gene:Gene	A gene product interaction between molecules that are in direct contact with each other.
+
+INTACT::PHYSICAL ASSOCIATION::Compound:Gene	A compound physically associates with a gene product.
+
+INTACT::PHYSICAL ASSOCIATION::Gene:Gene	A gene product physically associates with a gene product.
+
+INTACT::PROTEIN CLEAVAGE::Gene:Gene	A gene product covalent modification of a polypeptide occuring during its maturation or its proteolytic degradation.
+
+INTACT::UBIQUITINATION REACTION::Gene:Gene	A gene product reversible reaction that create a covalent bond between a c terminus g of ubiquitin and a k residue ....
+
+STRING::ACTIVATION::Gene:Gene	A gene product increases the activity or function of a gene product.
+
+STRING::BINDING::Gene:Gene	A gene product binds to a gene product.
+
+STRING::CATALYSIS::Gene:Gene	A gene product catalyzes a reaction involving a gene product.
+
+STRING::EXPRESSION::Gene:Gene	A gene product affects expression of a gene product.
+
+STRING::INHIBITION::Gene:Gene	A gene product decreases the activity or function of a gene product.
+
+STRING::OTHER::Gene:Gene	A gene product interaction that doesn t belong to other interaction types.
+
+STRING::PTMOD::Gene:Gene	A gene product post translational modification ptm refers to the covalent and generally enzymatic modification of p....
+
+STRING::REACTION::Gene:Gene	A gene product reaction a gene product.
+
+bioarx::DrugHumGen:Compound:Gene	A compound interaction a gene product.
+
+bioarx::DrugVirGen:Compound:Gene	A compound interaction a gene product.
+
+bioarx::HumGenHumGen:Gene:Gene	A gene product protein protein interaction.
+
+bioarx::VirGenHumGen:Gene:Gene	A gene product protein protein interaction.

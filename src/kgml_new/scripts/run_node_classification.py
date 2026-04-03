@@ -12,6 +12,7 @@ from kgml_new.data.datasets import (
     prepare_node_classification_dataset,
 )
 from kgml_new.data.loaders import load_pickled_graph
+from kgml_new.models.baseline_sage import NEIGHBOR_AGGREGATIONS
 from kgml_new.models.edge_aware_sage import EDGE_RELATION_MODES
 from kgml_new.training.node_classification import (
     NODE_CLASSIFICATION_METHODS,
@@ -40,6 +41,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--strict-semantic", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--edge-relation-mode", choices=EDGE_RELATION_MODES, default="concat")
     parser.add_argument("--num-relation-bases", type=int, default=4)
+    parser.add_argument(
+        "--neighbor-aggr",
+        choices=NEIGHBOR_AGGREGATIONS,
+        default="mean",
+        help="GraphSAGE neighbor aggregation for sage / edge_sage / link_mlp paths.",
+    )
     parser.add_argument("--out", type=Path, default=None)
     return parser.parse_args()
 
@@ -73,6 +80,7 @@ def main() -> None:
             seed=args.seed,
             edge_relation_mode=args.edge_relation_mode,
             num_relation_bases=args.num_relation_bases,
+            neighbor_aggr=args.neighbor_aggr,
         )
         _, _, history, val_metrics, test_metrics = train_txgnn_node_classifier(
             dataset.data,
@@ -115,6 +123,7 @@ def main() -> None:
             seed=args.seed,
             edge_relation_mode=args.edge_relation_mode,
             num_relation_bases=args.num_relation_bases,
+            neighbor_aggr=args.neighbor_aggr,
         )
         if spec.kind == "native":
             _, history, val_metrics, test_metrics = train_native_node_classifier(

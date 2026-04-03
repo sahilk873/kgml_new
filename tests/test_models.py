@@ -15,6 +15,7 @@ from kgml_new.models.baseline_sage import BaselineGraphSAGE
 from kgml_new.models.edge_aware_sage import (
     EdgeAwareGraphSAGE,
     RelationBasisMixtureGraphSAGE,
+    RelationFilmGraphSAGE,
     RelationGatedGraphSAGE,
     build_edge_aware_model,
 )
@@ -182,9 +183,72 @@ def test_build_edge_aware_model_selects_requested_mode():
         relation_table=rt,
         num_relation_bases=5,
     )
+    film_model = build_edge_aware_model(
+        edge_relation_mode="film",
+        in_channels=16,
+        edge_dim=8,
+        hidden_channels=8,
+        out_channels=16,
+        relation_table=rt,
+    )
     assert isinstance(concat_model, EdgeAwareGraphSAGE)
     assert isinstance(gated_model, RelationGatedGraphSAGE)
     assert isinstance(basis_model, RelationBasisMixtureGraphSAGE)
+    assert isinstance(film_model, RelationFilmGraphSAGE)
+    zf = film_model(data.x, data.edge_index, data.edge_attr)
+    assert zf.shape == (data.num_nodes, 16)
+
+    film_pool = build_edge_aware_model(
+        edge_relation_mode="film",
+        in_channels=16,
+        edge_dim=8,
+        hidden_channels=8,
+        out_channels=16,
+        relation_table=rt,
+        neighbor_aggr="max",
+    )
+    zp = film_pool(data.x, data.edge_index, data.edge_attr)
+    assert zp.shape == (data.num_nodes, 16)
+
+
+def test_baseline_graphsage_max_pool_forward():
+    m = BaselineGraphSAGE(16, 8, 16, num_layers=2, neighbor_aggr="max")
+    x = torch.randn(5, 16)
+    edge_index = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=torch.long)
+    z = m(x, edge_index)
+    assert z.shape == (5, 16)
+
+
+def test_edge_aware_isolated_node_embedding_nonzero():
+    """No neighbors -> neighbor agg is 0; root term should still move the embedding."""
+    g = nx.Graph()
+    g.add_edge("a", "b", relationship="T")
+    g.add_node("iso")
+    data, relation_lookup = networkx_to_data(g, in_dim=16, seed=0)
+    deg = torch.zeros(data.num_nodes, dtype=torch.long)
+    deg.index_add_(
+        0,
+        data.edge_index.flatten(),
+        torch.ones(data.edge_index.numel(), dtype=torch.long),
+    )
+    iso_idx = int((deg == 0).nonzero(as_tuple=True)[0][0].item())
+
+    device = torch.device("cpu")
+    edge_dim = 8
+    rel_emb = {k: torch.randn(edge_dim) * 0.1 for k in relation_lookup}
+    rt = build_relation_tensor(rel_emb, relation_lookup, edge_dim, device)
+    m = EdgeAwareGraphSAGE(
+        in_channels=16,
+        edge_dim=edge_dim,
+        hidden_channels=8,
+        out_channels=16,
+        relation_table=rt,
+        num_layers=2,
+        dropout=0.0,
+        concat=True,
+    )
+    z = m(data.x, data.edge_index, data.edge_attr)
+    assert z[iso_idx].abs().sum() > 1e-6
 
 
 def _get_primekg_path() -> Path:

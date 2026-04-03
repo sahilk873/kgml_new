@@ -11,15 +11,25 @@ from kgml_new.data.datasets import (
     compute_relation_diversity_buckets,
     prepare_link_prediction_dataset,
 )
-from kgml_new.data.loaders import GraphCSVSpec, PRIMEKG_CSV_SPEC, load_graph_csv, load_pickled_graph
+from kgml_new.data.loaders import (
+    GraphCSVSpec,
+    PRIMEKG_CSV_SPEC,
+    load_graph_csv,
+    load_pickled_graph,
+)
 from kgml_new.embeddings.semantic import (
+    DEFAULT_GLOSSARY_PATH,
     build_relation_tensor,
+    compute_semantic_similarity_matrix,
     relation_embeddings_from_graph,
 )
 from kgml_new.models.baseline_gcn import BaselineGCN
-from kgml_new.models.baseline_sage import BaselineGraphSAGE
+from kgml_new.models.baseline_sage import NEIGHBOR_AGGREGATIONS, BaselineGraphSAGE
 from kgml_new.models.edge_aware_sage import EDGE_RELATION_MODES, build_edge_aware_model
-from kgml_new.training.eval import evaluate_inductive_link_prediction, link_prediction_dot_product
+from kgml_new.training.eval import (
+    evaluate_inductive_link_prediction,
+    link_prediction_dot_product,
+)
 from kgml_new.training.link_unsupervised import (
     compute_node_embeddings,
     train_unsupervised_batched,
@@ -47,7 +57,9 @@ def parse_args() -> argparse.Namespace:
         ),
         required=True,
     )
-    parser.add_argument("--input", "--csv", dest="input_path", type=Path, default=Path("kg.csv"))
+    parser.add_argument(
+        "--input", "--csv", dest="input_path", type=Path, default=Path("kg.csv")
+    )
     parser.add_argument(
         "--input-format",
         choices=("auto", "csv", "pickle"),
@@ -56,9 +68,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-edges", type=int, default=None)
     parser.add_argument("--source-col", type=str, default=PRIMEKG_CSV_SPEC.source_col)
     parser.add_argument("--target-col", type=str, default=PRIMEKG_CSV_SPEC.target_col)
-    parser.add_argument("--relation-col", type=str, default=PRIMEKG_CSV_SPEC.relation_col)
-    parser.add_argument("--source-type-col", type=str, default=PRIMEKG_CSV_SPEC.source_type_col)
-    parser.add_argument("--target-type-col", type=str, default=PRIMEKG_CSV_SPEC.target_type_col)
+    parser.add_argument(
+        "--relation-col", type=str, default=PRIMEKG_CSV_SPEC.relation_col
+    )
+    parser.add_argument(
+        "--source-type-col", type=str, default=PRIMEKG_CSV_SPEC.source_type_col
+    )
+    parser.add_argument(
+        "--target-type-col", type=str, default=PRIMEKG_CSV_SPEC.target_type_col
+    )
     parser.add_argument(
         "--split-protocol",
         choices=("node", "edge"),
@@ -81,7 +99,7 @@ def parse_args() -> argparse.Namespace:
         "--semantic",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="For edge-aware methods: use OpenAI semantic relation embeddings by default.",
+        help="For edge-aware methods: use semantic relation embeddings by default.",
     )
     parser.add_argument(
         "--semantic-cache",
@@ -90,10 +108,36 @@ def parse_args() -> argparse.Namespace:
         help="Optional cache path for relation embeddings used by edge-aware methods.",
     )
     parser.add_argument(
+        "--embedding-model",
+        type=str,
+        choices=["openai", "sapbert", "random"],
+        default=None,
+        help="Embedding model for relation embeddings: openai, sapbert (PubMedBERT), or random.",
+    )
+    parser.add_argument(
+        "--sapbert-model",
+        type=str,
+        default="cambridgeltl/SapBERT-from-PubMedBERT-fulltext-mean-token",
+        help="HuggingFace model name for SapBERT",
+    )
+    parser.add_argument(
         "--strict-semantic",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Fail instead of falling back if OpenAI semantic embedding setup fails.",
+        help="Fail instead of falling back if embedding setup fails.",
+    )
+    parser.add_argument(
+        "--glossary-path",
+        type=Path,
+        default=None,
+        help="Path to relation glossary TSV file.",
+    )
+    parser.add_argument(
+        "--relation-text-mode",
+        type=str,
+        choices=("raw", "canonical"),
+        default="raw",
+        help="Text mode for relation prompts and semantic caches (raw vs canonical glossary rewrite).",
     )
     parser.add_argument(
         "--edge-relation-mode",
@@ -102,12 +146,37 @@ def parse_args() -> argparse.Namespace:
         help="How projected relation embeddings control edge-aware message passing.",
     )
     parser.add_argument(
+        "--concat",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Only for edge_relation_mode=concat: concatenate relation embedding with neighbor "
+        "features before the message linear. Gated, basis_mixture, and film always use "
+        "relation features in their own message rules; this flag does not change them.",
+    )
+    parser.add_argument(
         "--num-relation-bases",
         type=int,
         default=4,
         help="Number of shared basis message transforms for basis_mixture mode.",
     )
-    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument(
+        "--neighbor-aggr",
+        choices=NEIGHBOR_AGGREGATIONS,
+        default="mean",
+        help="GraphSAGE neighbor aggregation: mean (default) or max (Hamilton et al. pool).",
+    )
+    parser.add_argument(
+        "--semantic-alignment-lambda",
+        type=float,
+        default=0.0,
+        help="Weight for semantic alignment regularizer in basis_mixture mode.",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=100,
+        help="Training epochs (matches TrainConfig default).",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--in-dim", type=int, default=64)
     parser.add_argument("--output", type=Path, required=True)
@@ -138,7 +207,9 @@ def _load_graph(args: argparse.Namespace):
         input_format = "pickle" if suffix in {".pkl", ".pickle"} else "csv"
     if input_format == "pickle":
         return load_pickled_graph(args.input_path)
-    return load_graph_csv(args.input_path, spec=_csv_spec_from_args(args), max_edges=args.max_edges)
+    return load_graph_csv(
+        args.input_path, spec=_csv_spec_from_args(args), max_edges=args.max_edges
+    )
 
 
 def build_dataset(args: argparse.Namespace):
@@ -168,6 +239,48 @@ def history_dict(history) -> dict:
     }
 
 
+def _resolved_embedding_model(args: argparse.Namespace) -> str:
+    if args.embedding_model is not None:
+        return str(args.embedding_model)
+    return "random" if not args.semantic else "openai"
+
+
+def _maybe_build_semantic_similarity_for_alignment(
+    *,
+    args: argparse.Namespace,
+    graph,
+    relation_lookup: dict[str, int],
+    relation_table: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor | None:
+    if (
+        args.semantic_alignment_lambda <= 0
+        or args.edge_relation_mode != "basis_mixture"
+        or not args.semantic
+    ):
+        return None
+    emb_model = _resolved_embedding_model(args)
+    glossary_path = args.glossary_path or DEFAULT_GLOSSARY_PATH
+    rel_emb = relation_embeddings_from_graph(
+        graph,
+        edge_dim=int(relation_table.size(-1)),
+        cache_path=args.semantic_cache,
+        embedding_model=emb_model,
+        relation_text_mode=args.relation_text_mode,
+        strict_embedding=args.strict_semantic,
+        glossary_path=glossary_path,
+        sapbert_model=args.sapbert_model,
+    )
+    semantic_sim_matrix = compute_semantic_similarity_matrix(
+        rel_emb, relation_lookup
+    ).to(device)
+    print(
+        f"Semantic alignment enabled: lambda={args.semantic_alignment_lambda}, "
+        f"sim_matrix shape={tuple(semantic_sim_matrix.shape)}"
+    )
+    return semantic_sim_matrix
+
+
 def build_edge_aware_relation_table(
     *,
     args: argparse.Namespace,
@@ -176,15 +289,23 @@ def build_edge_aware_relation_table(
     edge_dim: int,
     device: torch.device,
 ) -> tuple[torch.Tensor, str]:
+    embedding_model = _resolved_embedding_model(args)
+    glossary_path = args.glossary_path or DEFAULT_GLOSSARY_PATH
+
     rel_emb = relation_embeddings_from_graph(
         training_graph,
         edge_dim=edge_dim,
         cache_path=args.semantic_cache,
-        use_openai=args.semantic,
-        strict_openai=args.strict_semantic,
+        embedding_model=embedding_model,
+        relation_text_mode=args.relation_text_mode,
+        strict_embedding=args.strict_semantic,
+        glossary_path=glossary_path,
+        sapbert_model=args.sapbert_model,
     )
     relation_table = build_relation_tensor(rel_emb, relation_lookup, edge_dim, device)
-    relation_init = "openai_semantic" if args.semantic else "random"
+    relation_init = (
+        f"{embedding_model}_semantic" if embedding_model != "random" else "random"
+    )
     return relation_table, relation_init
 
 
@@ -206,6 +327,7 @@ def build_edge_aware_encoder(
         concat=cfg.concat,
         normalize_output=normalize_output,
         num_relation_bases=cfg.num_relation_bases,
+        neighbor_aggr=cfg.neighbor_aggr,
     )
 
 
@@ -259,7 +381,9 @@ def main() -> None:
         "method": args.method,
         "device": str(device),
         "cuda_available": torch.cuda.is_available(),
-        "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        "gpu_name": torch.cuda.get_device_name(0)
+        if torch.cuda.is_available()
+        else None,
         "num_nodes": int(train_data.num_nodes),
         "num_train_edges": int(train_pos.size(1)),
         "num_val_edges": int(val_pos.size(1)),
@@ -274,6 +398,14 @@ def main() -> None:
         "semantic": args.semantic,
         "semantic_cache": str(args.semantic_cache) if args.semantic_cache else None,
         "strict_semantic": args.strict_semantic,
+        "embedding_model": args.embedding_model,
+        "embedding_model_resolved": _resolved_embedding_model(args),
+        "relation_text_mode": args.relation_text_mode,
+        "glossary_path": str(args.glossary_path)
+        if args.glossary_path is not None
+        else str(DEFAULT_GLOSSARY_PATH),
+        "sapbert_model": args.sapbert_model,
+        "semantic_alignment_lambda": args.semantic_alignment_lambda,
         "edge_relation_mode": args.edge_relation_mode,
         "num_relation_bases": args.num_relation_bases,
         "max_edges": args.max_edges,
@@ -288,12 +420,27 @@ def main() -> None:
             "min": min(diversity_counts.values()) if diversity_counts else 0,
             "max": max(diversity_counts.values()) if diversity_counts else 0,
         },
+        "edge_message_concat": args.concat
+        if args.method in ("edge_aware_sage", "edge_aware_link_mlp")
+        and args.edge_relation_mode == "concat"
+        else None,
+        "neighbor_aggr": args.neighbor_aggr
+        if args.method
+        in ("baseline_sage", "edge_aware_sage", "link_mlp", "edge_aware_link_mlp")
+        else None,
     }
 
     if args.method == "baseline_sage":
-        cfg = TrainConfig(epochs=args.epochs, seed=args.seed)
+        cfg = TrainConfig(
+            epochs=args.epochs, seed=args.seed, neighbor_aggr=args.neighbor_aggr
+        )
         model = BaselineGraphSAGE(
-            cfg.in_dim, cfg.hidden_dim, cfg.out_dim, num_layers=cfg.num_layers, dropout=cfg.dropout
+            cfg.in_dim,
+            cfg.hidden_dim,
+            cfg.out_dim,
+            num_layers=cfg.num_layers,
+            dropout=cfg.dropout,
+            neighbor_aggr=cfg.neighbor_aggr,
         )
         model, last_epoch, history = train_unsupervised_batched(
             model,
@@ -351,7 +498,11 @@ def main() -> None:
     elif args.method == "baseline_gcn":
         cfg = TrainConfig(epochs=args.epochs, seed=args.seed)
         model = BaselineGCN(
-            cfg.in_dim, cfg.hidden_dim, cfg.out_dim, num_layers=cfg.num_layers, dropout=cfg.dropout
+            cfg.in_dim,
+            cfg.hidden_dim,
+            cfg.out_dim,
+            num_layers=cfg.num_layers,
+            dropout=cfg.dropout,
         )
         model, last_epoch, history = train_unsupervised_fullgraph(
             model,
@@ -412,6 +563,8 @@ def main() -> None:
             seed=args.seed,
             edge_relation_mode=args.edge_relation_mode,
             num_relation_bases=args.num_relation_bases,
+            concat=args.concat,
+            neighbor_aggr=args.neighbor_aggr,
         )
         edge_dim = cfg.edge_dim
         relation_table, relation_init = build_edge_aware_relation_table(
@@ -422,6 +575,15 @@ def main() -> None:
             device=device,
         )
         model = build_edge_aware_encoder(cfg=cfg, relation_table=relation_table)
+
+        semantic_sim_matrix = _maybe_build_semantic_similarity_for_alignment(
+            args=args,
+            graph=dataset.graph,
+            relation_lookup=relation_lookup,
+            relation_table=relation_table,
+            device=device,
+        )
+
         model, last_epoch, history = train_unsupervised_batched(
             model,
             train_data,
@@ -429,6 +591,11 @@ def main() -> None:
             cfg,
             device=device,
             edge_aware=True,
+            semantic_similarity_matrix=semantic_sim_matrix,
+            semantic_alignment_lambda=args.semantic_alignment_lambda,
+            edge_attr_for_alignment=train_data.edge_attr,
+            alignment_train_pos_edge_index=train_pos,
+            alignment_train_pos_edge_attr=dataset.train_pos_edge_attr,
         )
         z = compute_node_embeddings(model, train_data, device, edge_aware=True)
         decoder_model, decoder_last_epoch, decoder_history = maybe_train_decoder(
@@ -499,13 +666,16 @@ def main() -> None:
             output["comparable_under_node_split"] = True
 
     elif args.method == "link_mlp":
-        base_cfg = TrainConfig(epochs=args.epochs, seed=args.seed)
+        base_cfg = TrainConfig(
+            epochs=args.epochs, seed=args.seed, neighbor_aggr=args.neighbor_aggr
+        )
         base_model = BaselineGraphSAGE(
             base_cfg.in_dim,
             base_cfg.hidden_dim,
             base_cfg.out_dim,
             num_layers=base_cfg.num_layers,
             dropout=base_cfg.dropout,
+            neighbor_aggr=base_cfg.neighbor_aggr,
         )
         base_model, base_last_epoch, base_history = train_unsupervised_batched(
             base_model,
@@ -515,7 +685,9 @@ def main() -> None:
             device=device,
             edge_aware=False,
         )
-        z = compute_node_embeddings(base_model, train_data, device, edge_aware=False).detach()
+        z = compute_node_embeddings(
+            base_model, train_data, device, edge_aware=False
+        ).detach()
         mlp_cfg = LinkMLPConfig(
             epochs=args.epochs,
             seed=args.seed,
@@ -566,6 +738,8 @@ def main() -> None:
             seed=args.seed,
             edge_relation_mode=args.edge_relation_mode,
             num_relation_bases=args.num_relation_bases,
+            concat=args.concat,
+            neighbor_aggr=args.neighbor_aggr,
         )
         edge_dim = base_cfg.edge_dim
         relation_table, relation_init = build_edge_aware_relation_table(
@@ -575,7 +749,16 @@ def main() -> None:
             edge_dim=edge_dim,
             device=device,
         )
-        base_model = build_edge_aware_encoder(cfg=base_cfg, relation_table=relation_table)
+        base_model = build_edge_aware_encoder(
+            cfg=base_cfg, relation_table=relation_table
+        )
+        semantic_sim_matrix = _maybe_build_semantic_similarity_for_alignment(
+            args=args,
+            graph=dataset.graph,
+            relation_lookup=relation_lookup,
+            relation_table=relation_table,
+            device=device,
+        )
         base_model, base_last_epoch, base_history = train_unsupervised_batched(
             base_model,
             train_data,
@@ -583,8 +766,15 @@ def main() -> None:
             base_cfg,
             device=device,
             edge_aware=True,
+            semantic_similarity_matrix=semantic_sim_matrix,
+            semantic_alignment_lambda=args.semantic_alignment_lambda,
+            edge_attr_for_alignment=train_data.edge_attr,
+            alignment_train_pos_edge_index=train_pos,
+            alignment_train_pos_edge_attr=dataset.train_pos_edge_attr,
         )
-        z = compute_node_embeddings(base_model, train_data, device, edge_aware=True).detach()
+        z = compute_node_embeddings(
+            base_model, train_data, device, edge_aware=True
+        ).detach()
         mlp_cfg = LinkMLPConfig(
             epochs=args.epochs,
             seed=args.seed,

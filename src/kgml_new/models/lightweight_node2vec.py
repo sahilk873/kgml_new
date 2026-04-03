@@ -129,10 +129,14 @@ def train_lightweight_node2vec(
         pos_rw, neg_rw = [], []
         for src, ctx in generate_walks():
             for dst in ctx[1:]:
+                neg_pool = non_neighbors[src]
+                if not neg_pool:
+                    neg_pool = [j for j in range(num_nodes) if j != src]
+                if not neg_pool:
+                    continue
                 pos_rw.append([src, dst])
                 for _ in range(num_negative_samples):
-                    neg_node = rng.choice(non_neighbors[src])
-                    neg_rw.append([src, neg_node])
+                    neg_rw.append([src, rng.choice(neg_pool)])
 
             if len(pos_rw) >= batch_size:
                 pos_rw_t = torch.tensor(pos_rw, dtype=torch.long, device=device)

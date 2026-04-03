@@ -25,33 +25,59 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate and cache relation embeddings from a graph using glossary-first semantic prompts."
     )
-    parser.add_argument("--input", type=Path, required=True, help="CSV, TSV, or pickled networkx.Graph")
-    parser.add_argument("--input-format", choices=("auto", "csv", "pickle"), default="auto")
-    parser.add_argument("--output", type=Path, required=True, help="Output .pt cache path")
+    parser.add_argument(
+        "--input", type=Path, required=True, help="CSV, TSV, or pickled networkx.Graph"
+    )
+    parser.add_argument(
+        "--input-format", choices=("auto", "csv", "pickle"), default="auto"
+    )
+    parser.add_argument(
+        "--output", type=Path, required=True, help="Output .pt cache path"
+    )
     parser.add_argument(
         "--edge-dim",
         type=int,
         default=32,
-        help="Output width for random relation embeddings. Semantic embeddings keep their full OpenAI width.",
+        help="Output width for random relation embeddings. Semantic embeddings keep their full width.",
     )
     parser.add_argument("--max-edges", type=int, default=None)
     parser.add_argument("--source-col", type=str, default=PRIMEKG_CSV_SPEC.source_col)
     parser.add_argument("--target-col", type=str, default=PRIMEKG_CSV_SPEC.target_col)
-    parser.add_argument("--relation-col", type=str, default=PRIMEKG_CSV_SPEC.relation_col)
-    parser.add_argument("--source-type-col", type=str, default=PRIMEKG_CSV_SPEC.source_type_col)
-    parser.add_argument("--target-type-col", type=str, default=PRIMEKG_CSV_SPEC.target_type_col)
-    parser.add_argument("--glossary-path", type=Path, default=DEFAULT_GLOSSARY_PATH)
     parser.add_argument(
-        "--semantic",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Use OpenAI semantic embeddings. Use --no-semantic for the random ablation cache.",
+        "--relation-col", type=str, default=PRIMEKG_CSV_SPEC.relation_col
     )
     parser.add_argument(
-        "--strict-semantic",
+        "--source-type-col", type=str, default=PRIMEKG_CSV_SPEC.source_type_col
+    )
+    parser.add_argument(
+        "--target-type-col", type=str, default=PRIMEKG_CSV_SPEC.target_type_col
+    )
+    parser.add_argument("--glossary-path", type=Path, default=DEFAULT_GLOSSARY_PATH)
+    parser.add_argument(
+        "--embedding-model",
+        type=str,
+        choices=["openai", "sapbert", "random"],
+        default="openai",
+        help="Embedding model: openai (text-embedding-3-small), sapbert (PubMedBERT-based), or random",
+    )
+    parser.add_argument(
+        "--relation-text-mode",
+        type=str,
+        choices=["raw", "canonical"],
+        default="raw",
+        help="Text mode for relation embedding: raw (original glossary text) or canonical (rewritten clean sentences)",
+    )
+    parser.add_argument(
+        "--sapbert-model",
+        type=str,
+        default="cambridgeltl/SapBERT-from-PubMedBERT-fulltext-mean-token",
+        help="HuggingFace model name for SapBERT",
+    )
+    parser.add_argument(
+        "--strict-embedding",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Fail instead of falling back if OpenAI semantic embedding setup fails.",
+        help="Fail instead of falling back if embedding fails.",
     )
     return parser.parse_args()
 
@@ -118,9 +144,11 @@ def main() -> None:
             graph,
             edge_dim=args.edge_dim,
             cache_path=args.output,
-            use_openai=args.semantic,
-            strict_openai=args.strict_semantic,
+            embedding_model=args.embedding_model,
+            relation_text_mode=args.relation_text_mode,
+            strict_embedding=args.strict_embedding,
             glossary_path=args.glossary_path,
+            sapbert_model=args.sapbert_model,
         )
     else:
         edge_types = _load_relation_types_from_table(args)
@@ -128,18 +156,22 @@ def main() -> None:
             edge_types,
             edge_dim=args.edge_dim,
             cache_path=args.output,
-            use_openai=args.semantic,
-            strict_openai=args.strict_semantic,
+            embedding_model=args.embedding_model,
+            relation_text_mode=args.relation_text_mode,
+            strict_embedding=args.strict_embedding,
             glossary_path=args.glossary_path,
+            sapbert_model=args.sapbert_model,
         )
     print(f"Saved {len(rel_emb)} relation embeddings to {args.output}")
+    print(f"Embedding model: {args.embedding_model}")
+    print(f"Relation text mode: {args.relation_text_mode}")
+    if args.embedding_model == "sapbert":
+        print(f"SapBERT model: {args.sapbert_model}")
     print(f"Glossary path: {args.glossary_path}")
-    print("Sample prompts:")
-    for rel in edge_types[:5]:
-        print(f"- {rel}: {describe_relation(rel, glossary_path=args.glossary_path)}")
-    sample_rel = next(iter(rel_emb), None)
-    if sample_rel is not None:
-        print(f"Embedding dimension: {int(rel_emb[sample_rel].numel())}")
+    # Print embedding dimension
+    if len(rel_emb) > 0:
+        sample_key = next(iter(rel_emb.keys()))
+        print(f"Embedding dimension: {int(rel_emb[sample_key].numel())}")
 
 
 if __name__ == "__main__":

@@ -7,6 +7,19 @@ This repository supports two main experiment families:
 
 The default benchmark for link prediction is the node-disjoint split. That is the main setting to use when comparing methods intended to generalize to unseen entities.
 
+For cache formats, embedding APIs, DRKG caveats, and **checklists for code changes**, see [`AGENTS.md`](AGENTS.md).
+
+## End-to-end experimental procedure
+
+Use this sequence for a reproducible link-prediction run:
+
+1. **Environment:** `pip install -e ".[dev]"` and, if using OpenAI relation embeddings, `pip install -e ".[semantic]"` plus `OPENAI_API_KEY` (and optionally `.env` via `python-dotenv`).
+2. **Choose input:** PrimeKG CSV (`kg.csv`), DRKG TSV (`drkg.tsv`), another table (set `--source-col` / `--target-col` / `--relation-col`), or a pickle (`--input-format pickle`). Remember DRKG prefix slices are often single-relation unless you shuffle or sample (see below).
+3. **Optional relation cache (edge-aware / semantic):** Precompute once with `generate_relation_embeddings` (see [Relation embedding cache generator](#relation-embedding-cache-generator)). Match `--max-edges` and relation vocabulary to the graph slice you will train on.
+4. **Run one method:** `python -m kgml_new.scripts.run_gpu_method --method ... --output results/....json` with explicit `--split-protocol`, `--seed`, `--epochs`, and any `--semantic` / `--semantic-cache` / `--embedding-model` settings.
+5. **Record metadata:** Save the exact shell command, dataset path, whether `--max-edges` was a prefix slice, cache path, and JSON output path (the result file already contains many of these fields—verify them).
+6. **Sanity-check:** Run the [verification](#verification-smoke-tests-and-tests) commands after environment or code changes.
+
 ## Environment
 
 Create or reuse the repo virtualenv:
@@ -207,13 +220,23 @@ Relation-basis-mixture GraphSAGE:
   --output results/edge_aware_sage-basis-node.json
 ```
 
-Precompute a DRKG glossary-first relation cache once and reuse it:
+Precompute a DRKG glossary-first OpenAI relation cache once and reuse it:
 
 ```bash
 .venv/bin/python -m kgml_new.scripts.generate_relation_embeddings \
   --input drkg.tsv \
   --output cache/drkg-relations.pt \
-  --semantic
+  --embedding-model openai
+```
+
+Random relation cache (no API calls), same relation set:
+
+```bash
+.venv/bin/python -m kgml_new.scripts.generate_relation_embeddings \
+  --input drkg.tsv \
+  --output cache/drkg-relations-random.pt \
+  --embedding-model random \
+  --edge-dim 32
 ```
 
 Node2Vec:
@@ -253,11 +276,15 @@ Link MLP scorer:
 - `--negatives-per-pos`: number of negatives per positive in validation/test
 - `--decoder {dot,mlp}`: link scoring head
 - `--shuffle-relations`: relation-label ablation
-- `--semantic` / `--no-semantic`: use OpenAI semantic relation embeddings or random relation embeddings for edge-aware methods
-- `--semantic-cache`: cache file for relation embeddings
-- `--strict-semantic`: fail instead of silently falling back if semantic embedding setup fails
+- `--semantic` / `--no-semantic`: for edge-aware methods, semantic is on by default; `--no-semantic` uses random relation embeddings unless you set `--embedding-model` explicitly
+- `--embedding-model {openai,sapbert,random}`: relation embedding backend (defaults: `openai` when `--semantic`, `random` when `--no-semantic`; you can override, e.g. SapBERT while keeping `--semantic`)
+- `--semantic-cache`: optional `.pt` cache for relation embeddings (must match model slice / relation vocabulary when possible)
+- `--glossary-path`: override default `relation_glossary.tsv` for DRKG-style prompts
+- `--sapbert-model`: HuggingFace id when `--embedding-model sapbert`
+- `--strict-semantic`: fail instead of silently falling back if embedding setup fails
 - `--edge-relation-mode {concat,gated,basis_mixture}`: how projected relation embeddings control message passing
 - `--num-relation-bases`: number of shared basis transforms for `basis_mixture`
+- `--semantic-alignment-lambda`: optional regularizer for `basis_mixture` when semantic embeddings are enabled (see `run_gpu_method --help`)
 - `--epochs`
 - `--seed`
 - `--in-dim`
@@ -278,8 +305,9 @@ Link MLP scorer:
 `edge_aware_sage`
 
 - relation-aware message passing
-- defaults to OpenAI semantic relation embeddings in both `run_gpu_method` and `run_link_prediction`
-- use `--no-semantic` for the random-initialized ablation
+- defaults to OpenAI semantic relation embeddings in `run_gpu_method` when `--semantic` is on; use `--embedding-model sapbert` or `random` to change the backend
+- legacy `run_link_prediction` uses `--semantic` for OpenAI only; prefer `run_gpu_method` for full embedding-model control
+- use `--no-semantic` for the random-initialized ablation (or `--embedding-model random`)
 - semantic prompts use `relation_glossary.tsv` for DRKG-style sourced predicates and fall back to raw relation strings otherwise
 - `concat` is the current baseline
 - `gated` uses the relation embedding to gate the learned neighbor message
@@ -365,22 +393,22 @@ python -m kgml_new.scripts.generate_relation_embeddings --help
 This script creates the cached relation embedding table used by the edge-aware semantic runners.
 The same semantic cache can be reused across `concat`, `gated`, and `basis_mixture` runs because the cache stores relation embeddings only, not the message-passing mechanism.
 
-Example for DRKG:
+Example for DRKG (OpenAI):
 
 ```bash
 .venv/bin/python -m kgml_new.scripts.generate_relation_embeddings \
   --input drkg.tsv \
   --output cache/drkg-relations.pt \
-  --semantic
+  --embedding-model openai
 ```
 
-Example for PrimeKG:
+Example for PrimeKG (OpenAI):
 
 ```bash
 .venv/bin/python -m kgml_new.scripts.generate_relation_embeddings \
   --input kg.csv \
   --output cache/primekg-relations.pt \
-  --semantic
+  --embedding-model openai
 ```
 
 Important arguments:
@@ -388,11 +416,13 @@ Important arguments:
 - `--input`: CSV, TSV, or pickle path
 - `--input-format {auto,csv,pickle}`
 - `--output`: `.pt` cache file to create
-- `--edge-dim`: embedding width for random relation caches; semantic caches keep full OpenAI width
-- `--max-edges`: useful for smoke tests
-- `--semantic` / `--no-semantic`
-- `--strict-semantic`
-- `--glossary-path`: override the default DRKG relation glossary path
+- `--embedding-model {openai,sapbert,random}`: **required choice**—there is no `--semantic` flag on this script
+- `--relation-text-mode {raw,canonical}`: prompt style for embedding text
+- `--edge-dim`: width for **random** relation vectors; OpenAI/SapBERT caches store full model width
+- `--max-edges`: useful for smoke tests and slice-matched caches
+- `--strict-embedding`: fail instead of falling back when embedding fails
+- `--glossary-path`: override the default relation glossary path
+- `--sapbert-model`: HuggingFace model name when using SapBERT
 
 ## TxGNN Experiments
 
@@ -562,6 +592,36 @@ sbatch scripts/slurm/run_baseline_sage.slurm
 ```
 
 Adjust paths, partitions, memory, and output locations for your cluster before submitting.
+
+## Verification (smoke tests and tests)
+
+After changing dependencies or Python code, run:
+
+```bash
+pip install -e ".[dev]"
+.venv/bin/python -m pytest tests/ -q
+```
+
+Quick link-prediction smoke (CPU-friendly):
+
+```bash
+.venv/bin/python -m kgml_new.scripts.run_gpu_method \
+  --method baseline_sage \
+  --input drkg.tsv \
+  --max-edges 1000 \
+  --epochs 1 \
+  --output /tmp/drkg-smoke.json
+
+.venv/bin/python -m kgml_new.scripts.run_gpu_method \
+  --method edge_aware_sage \
+  --input drkg.tsv \
+  --max-edges 500 \
+  --epochs 1 \
+  --no-semantic \
+  --output /tmp/drkg-edge-smoke.json
+```
+
+**Node2Vec:** PyTorch Geometric’s `Node2Vec` optionally needs `pyg-lib` or `torch-cluster`. If those are missing, the code falls back to an internal lightweight trainer; for very small dense graphs (e.g. a triangle), negatives may include neighbors as a fallback so training does not crash.
 
 ## Practical Notes
 

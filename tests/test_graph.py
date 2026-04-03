@@ -153,12 +153,12 @@ def test_legacy_semantic_cache_is_regenerated(tmp_path: Path, monkeypatch):
         ["rel"],
         edge_dim=8,
         cache_path=cache_path,
-        use_openai=True,
+        embedding_model="openai",
     )
 
     assert rel_emb["rel"].numel() == 16
     saved = torch.load(cache_path)
-    assert saved["format_version"] == 2
+    assert saved["format_version"] == 4
     assert saved["embedding_dim"] == 16
 
 

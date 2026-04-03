@@ -15,6 +15,8 @@ GraphSAGE training defaults to mini-batch neighbor sampling via `LinkNeighborLoa
 
 No Kedro. Intended for graphs built from **PrimeKG** or any **NetworkX** graph with relation attributes on edges.
 
+**Where to read next:** step-by-step experiment procedures, split protocols, and CLI reference are in [`EXPERIMENTS.md`](EXPERIMENTS.md). Conventions for agents and maintainers (caches, APIs, caveats) are in [`AGENTS.md`](AGENTS.md).
+
 ## Install
 
 ```bash
@@ -23,7 +25,7 @@ pip install -e ".[dev]"           # core + pytest
 pip install -e ".[semantic]"        # optional: OpenAI relation embeddings
 ```
 
-Set `OPENAI_API_KEY` when using `--semantic` / OpenAI path.
+Set `OPENAI_API_KEY` when using OpenAI relation embeddings (`run_gpu_method --semantic`, or `generate_relation_embeddings --embedding-model openai`).
 For HPC or fresh cluster installs, prefer `./scripts/setup_hpc.sh` because it also installs the matching PyTorch Geometric backends.
 
 Semantic relation embeddings now use `relation_glossary.tsv` for DRKG-style sourced predicates and fall back to the raw relation string otherwise. PrimeKG-style labels remain raw-string prompts unless a separate PrimeKG glossary is added.
@@ -37,7 +39,7 @@ python -m kgml_new.scripts.run_gpu_method --method baseline_sage --input kg.csv 
 python -m kgml_new.scripts.run_gpu_method --method edge_aware_sage --input drkg.tsv --semantic --semantic-cache cache/drkg-relations.pt --edge-relation-mode concat --epochs 20 --output drkg-edge-aware.json
 python -m kgml_new.scripts.run_gpu_method --method edge_aware_sage --input drkg.tsv --semantic --semantic-cache cache/drkg-relations.pt --edge-relation-mode gated --epochs 20 --output drkg-edge-aware-gated.json
 python -m kgml_new.scripts.run_gpu_method --method edge_aware_sage --input drkg.tsv --semantic --semantic-cache cache/drkg-relations.pt --edge-relation-mode basis_mixture --num-relation-bases 4 --epochs 20 --output drkg-edge-aware-basis.json
-python -m kgml_new.scripts.generate_relation_embeddings --input drkg.tsv --output cache/drkg-relations.pt --semantic
+python -m kgml_new.scripts.generate_relation_embeddings --input drkg.tsv --output cache/drkg-relations.pt --embedding-model openai
 python -m kgml_new.scripts.run_txgnn --input kg.csv --source-col x_name --target-col y_name --relation-col relation --relation indication --epochs 20 --output txgnn.json
 python -m kgml_new.scripts.run_node_classification --graph /path/to/graph.pkl --method edge_sage --semantic --semantic-cache cache/relations.pt --edge-relation-mode basis_mixture --num-relation-bases 4 --out node-cls.json
 ```
@@ -65,7 +67,7 @@ You can precompute the DRKG glossary-first relation embedding cache and reuse it
 .venv/bin/python -m kgml_new.scripts.generate_relation_embeddings \
   --input drkg.tsv \
   --output cache/drkg-relations.pt \
-  --semantic
+  --embedding-model openai
 ```
 
 Then point the edge-aware runner at the same cache:

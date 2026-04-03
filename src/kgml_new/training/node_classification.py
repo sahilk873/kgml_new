@@ -81,6 +81,7 @@ def _build_native_model(
             num_layers=cfg.num_layers,
             dropout=cfg.dropout,
             normalize_output=False,
+            neighbor_aggr=cfg.neighbor_aggr,
         )
     if method == "gcn":
         return BaselineGCN(
@@ -98,8 +99,8 @@ def _build_native_model(
             graph,
             edge_dim=cfg.edge_dim,
             cache_path=semantic_cache,
-            use_openai=use_semantic,
-            strict_openai=strict_semantic,
+            embedding_model="openai" if use_semantic else "random",
+            strict_embedding=strict_semantic,
         )
         relation_table = build_relation_tensor(
             rel_emb,
@@ -119,6 +120,7 @@ def _build_native_model(
             concat=cfg.concat,
             normalize_output=False,
             num_relation_bases=cfg.num_relation_bases,
+            neighbor_aggr=cfg.neighbor_aggr,
         )
     raise ValueError(f"Unsupported native node classification method: {method}")
 
@@ -275,6 +277,7 @@ def _train_embeddings_for_method(
             seed=cfg.seed,
             dropout=cfg.dropout,
             concat=cfg.concat,
+            neighbor_aggr=cfg.neighbor_aggr,
         )
         encoder = BaselineGraphSAGE(
             cfg.in_dim,
@@ -283,6 +286,7 @@ def _train_embeddings_for_method(
             num_layers=cfg.num_layers,
             dropout=cfg.dropout,
             normalize_output=True,
+            neighbor_aggr=cfg.neighbor_aggr,
         )
         train_unsupervised(
             encoder,

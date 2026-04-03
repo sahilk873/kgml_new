@@ -22,6 +22,7 @@ class TrainConfig:
     concat: bool = True
     edge_relation_mode: str = "concat"
     num_relation_bases: int = 4
+    neighbor_aggr: str = "mean"
 
 
 @dataclass
@@ -93,3 +94,4 @@ class NodeClassificationConfig:
     concat: bool = True
     edge_relation_mode: str = "concat"
     num_relation_bases: int = 4
+    neighbor_aggr: str = "mean"

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import torch
@@ -9,11 +9,89 @@ from torch import nn
 from torch_geometric.data import Data
 
 from kgml_new.config import TrainConfig
+from kgml_new.models.edge_aware_sage import (
+    RelationBasisMixtureSAGELayer,
+    mixture_weights_from_relation_indices,
+)
 from kgml_new.training.history import TrainingHistory
 from kgml_new.io.artifacts import torch_load_checkpoint, torch_save_checkpoint
 
 
-def _encode(model: nn.Module, data: Data, device: torch.device, edge_aware: bool) -> torch.Tensor:
+def _build_canonical_edge_relation_lookup(
+    train_pos_edge_index: torch.Tensor,
+    train_pos_edge_attr: torch.Tensor,
+) -> dict[tuple[int, int], int]:
+    lookup: dict[tuple[int, int], int] = {}
+    ei = train_pos_edge_index.cpu().long()
+    ea = train_pos_edge_attr.cpu().long()
+    for i in range(ei.size(1)):
+        s, d = int(ei[0, i]), int(ei[1, i])
+        a, b = min(s, d), max(s, d)
+        lookup[(a, b)] = int(ea[i].item())
+    return lookup
+
+
+def _model_has_basis_mixture(model: nn.Module) -> bool:
+    return any(isinstance(m, RelationBasisMixtureSAGELayer) for m in model.modules())
+
+
+def _relation_ids_for_global_supervision_edges(
+    g_src: torch.Tensor,
+    g_dst: torch.Tensor,
+    lookup: dict[tuple[int, int], int],
+    device: torch.device,
+) -> torch.Tensor:
+    gs = g_src.detach().cpu().tolist()
+    gd = g_dst.detach().cpu().tolist()
+    ids: list[int] = []
+    for i in range(len(gs)):
+        a, b = min(gs[i], gd[i]), max(gs[i], gd[i])
+        rid = lookup.get((a, b), -1)
+        ids.append(rid)
+    return torch.tensor(ids, device=device, dtype=torch.long)
+
+
+def semantic_alignment_loss(
+    mixture_weights: torch.Tensor,
+    relation_indices: torch.Tensor,
+    similarity_matrix: torch.Tensor,
+    lambda_reg: float = 0.1,
+) -> torch.Tensor:
+    """
+    Semantic alignment regularizer for basis mixture model.
+
+    Encourages the learned mixture weights to preserve the semantic geometry
+    from the frozen relation embeddings.
+
+    Args:
+        mixture_weights: (batch_size, num_bases) mixture weights from basis mixture
+        relation_indices: (batch_size,) indices of relations for each edge
+        similarity_matrix: (num_relations, num_relations) cosine similarity matrix
+        lambda_reg: weight for the regularization term
+
+    Loss: sum_{i,j} sim(semantic_i, semantic_j) * ||alpha_i - alpha_j||^2
+    """
+    batch_size = mixture_weights.size(0)
+    if batch_size < 2:
+        return torch.tensor(0.0, device=mixture_weights.device)
+
+    rel_idx_i = relation_indices.unsqueeze(1)
+    rel_idx_j = relation_indices.unsqueeze(0)
+
+    sem_sim = similarity_matrix[rel_idx_i, rel_idx_j]
+
+    alpha_i = mixture_weights.unsqueeze(1)
+    alpha_j = mixture_weights.unsqueeze(0)
+    diff = (alpha_i - alpha_j).pow(2).sum(dim=-1)
+
+    alignment_loss = (sem_sim * diff).sum() / (batch_size * batch_size)
+
+    return lambda_reg * alignment_loss
+
+
+def _encode(
+    model: nn.Module, data: Data, device: torch.device, edge_aware: bool
+) -> torch.Tensor:
     x = data.x.to(device)
     edge_index = data.edge_index.to(device)
     if edge_aware:
@@ -50,6 +128,8 @@ def train_unsupervised(
         checkpoint_path=checkpoint_path,
         resume=resume,
         save_every_epochs=save_every_epochs,
+        alignment_train_pos_edge_index=None,
+        alignment_train_pos_edge_attr=None,
     )
     return model, last_epoch
 
@@ -98,6 +178,11 @@ def train_unsupervised_batched(
     checkpoint_path: str | Path | None = None,
     resume: bool = False,
     save_every_epochs: int = 1,
+    semantic_similarity_matrix: torch.Tensor | None = None,
+    semantic_alignment_lambda: float = 0.0,
+    edge_attr_for_alignment: torch.Tensor | None = None,
+    alignment_train_pos_edge_index: torch.Tensor | None = None,
+    alignment_train_pos_edge_attr: torch.Tensor | None = None,
 ) -> tuple[nn.Module, int, TrainingHistory]:
     return _train_unsupervised_batched(
         model=model,
@@ -113,6 +198,11 @@ def train_unsupervised_batched(
         checkpoint_path=checkpoint_path,
         resume=resume,
         save_every_epochs=save_every_epochs,
+        semantic_similarity_matrix=semantic_similarity_matrix,
+        semantic_alignment_lambda=semantic_alignment_lambda,
+        edge_attr_for_alignment=edge_attr_for_alignment,
+        alignment_train_pos_edge_index=alignment_train_pos_edge_index,
+        alignment_train_pos_edge_attr=alignment_train_pos_edge_attr,
     )
 
 
@@ -129,6 +219,9 @@ def _train_unsupervised_fullgraph(
     checkpoint_path: str | Path | None = None,
     resume: bool = False,
     save_every_epochs: int = 1,
+    semantic_similarity_matrix: torch.Tensor | None = None,
+    semantic_alignment_lambda: float = 0.0,
+    edge_attr_for_alignment: torch.Tensor | None = None,
 ) -> tuple[nn.Module, int, TrainingHistory]:
     """Full-graph training (no neighbor sampling) with history tracking."""
     from kgml_new.training.eval import link_prediction_dot_product
@@ -198,6 +291,31 @@ def _train_unsupervised_fullgraph(
             )
 
             batch_loss = (pos_loss + neg_loss) / max(s.numel(), 1)
+
+            if (
+                semantic_alignment_lambda > 0
+                and semantic_similarity_matrix is not None
+                and edge_attr_for_alignment is not None
+                and edge_aware
+                and _model_has_basis_mixture(model)
+            ):
+                edge_attrs = edge_attr_for_alignment.to(device)
+                edge_rel_indices = (
+                    edge_attrs[sl] if edge_attrs.size(0) >= pos.size(1) else edge_attrs
+                )
+
+                alpha = mixture_weights_from_relation_indices(
+                    model, edge_rel_indices.to(device)
+                )
+                if alpha.size(0) > 0:
+                    align_loss = semantic_alignment_loss(
+                        alpha,
+                        edge_rel_indices.to(device),
+                        semantic_similarity_matrix.to(device),
+                        lambda_reg=semantic_alignment_lambda,
+                    )
+                    batch_loss = batch_loss + align_loss
+
             batch_loss.backward()
             optimizer.step()
             total_loss += float(batch_loss.detach())
@@ -262,6 +380,11 @@ def _train_unsupervised_batched(
     checkpoint_path: str | Path | None = None,
     resume: bool = False,
     save_every_epochs: int = 1,
+    semantic_similarity_matrix: torch.Tensor | None = None,
+    semantic_alignment_lambda: float = 0.0,
+    edge_attr_for_alignment: torch.Tensor | None = None,
+    alignment_train_pos_edge_index: torch.Tensor | None = None,
+    alignment_train_pos_edge_attr: torch.Tensor | None = None,
 ) -> tuple[nn.Module, int, TrainingHistory]:
     """
     Batched link prediction using LinkNeighborLoader (original GraphSAGE algorithm).
@@ -288,7 +411,34 @@ def _train_unsupervised_batched(
             checkpoint_path=checkpoint_path,
             resume=resume,
             save_every_epochs=save_every_epochs,
+            semantic_similarity_matrix=semantic_similarity_matrix,
+            semantic_alignment_lambda=semantic_alignment_lambda,
+            edge_attr_for_alignment=edge_attr_for_alignment,
         )
+
+    alignment_lookup: dict[tuple[int, int], int] | None = None
+    alignment_batched_skip_warned = False
+    if (
+        semantic_alignment_lambda > 0
+        and semantic_similarity_matrix is not None
+        and edge_aware
+    ):
+        if (
+            alignment_train_pos_edge_index is not None
+            and alignment_train_pos_edge_attr is not None
+        ):
+            alignment_lookup = _build_canonical_edge_relation_lookup(
+                alignment_train_pos_edge_index,
+                alignment_train_pos_edge_attr,
+            )
+        else:
+            if not alignment_batched_skip_warned:
+                print(
+                    "semantic_alignment_lambda > 0 but alignment_train_pos_edge_index/"
+                    "alignment_train_pos_edge_attr not provided; skipping alignment in "
+                    "batched training."
+                )
+                alignment_batched_skip_warned = True
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -356,6 +506,35 @@ def _train_unsupervised_batched(
             edge_label = batch.edge_label.float()
             logits = (z[edge_label_index[0]] * z[edge_label_index[1]]).sum(dim=-1)
             batch_loss = F.binary_cross_entropy_with_logits(logits, edge_label)
+
+            if (
+                semantic_alignment_lambda > 0
+                and semantic_similarity_matrix is not None
+                and alignment_lookup is not None
+                and edge_aware
+                and _model_has_basis_mixture(model)
+            ):
+                pos_mask = edge_label > 0.5
+                if pos_mask.any():
+                    loc_src = batch.edge_label_index[0, pos_mask]
+                    loc_dst = batch.edge_label_index[1, pos_mask]
+                    g_src = batch.n_id[loc_src]
+                    g_dst = batch.n_id[loc_dst]
+                    rel_idx = _relation_ids_for_global_supervision_edges(
+                        g_src, g_dst, alignment_lookup, device
+                    )
+                    valid = rel_idx >= 0
+                    if valid.sum() >= 2:
+                        rel_kept = rel_idx[valid]
+                        alpha = mixture_weights_from_relation_indices(model, rel_kept)
+                        align_loss = semantic_alignment_loss(
+                            alpha,
+                            rel_kept,
+                            semantic_similarity_matrix.to(device),
+                            lambda_reg=semantic_alignment_lambda,
+                        )
+                        batch_loss = batch_loss + align_loss
+
             batch_loss.backward()
             optimizer.step()
 

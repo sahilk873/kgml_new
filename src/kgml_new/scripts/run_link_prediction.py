@@ -15,7 +15,7 @@ from kgml_new.embeddings.semantic import (
     build_relation_tensor,
     relation_embeddings_from_graph,
 )
-from kgml_new.models.baseline_sage import BaselineGraphSAGE
+from kgml_new.models.baseline_sage import NEIGHBOR_AGGREGATIONS, BaselineGraphSAGE
 from kgml_new.models.edge_aware_sage import EDGE_RELATION_MODES, build_edge_aware_model
 from kgml_new.training.eval import evaluate_inductive_link_prediction
 from kgml_new.training.link_unsupervised import (
@@ -80,6 +80,12 @@ def main() -> None:
         default=4,
         help="Number of shared basis message transforms for basis_mixture mode.",
     )
+    p.add_argument(
+        "--neighbor-aggr",
+        choices=NEIGHBOR_AGGREGATIONS,
+        default="mean",
+        help="GraphSAGE neighbor aggregation: mean or max (pool).",
+    )
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
@@ -88,7 +94,9 @@ def main() -> None:
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
-    cfg = TrainConfig(epochs=args.epochs, seed=args.seed)
+    cfg = TrainConfig(
+        epochs=args.epochs, seed=args.seed, neighbor_aggr=args.neighbor_aggr
+    )
 
     g = load_pickled_graph(args.graph)
     dataset = prepare_link_prediction_dataset(
@@ -125,6 +133,7 @@ def main() -> None:
             cfg.out_dim,
             num_layers=cfg.num_layers,
             dropout=cfg.dropout,
+            neighbor_aggr=cfg.neighbor_aggr,
         )
         train_unsupervised(
             model,
@@ -141,7 +150,7 @@ def main() -> None:
                 dataset.graph,
                 edge_dim=cfg.edge_dim,
                 cache_path=args.cache,
-                use_openai=True,
+                embedding_model="openai",
             )
         else:
             rel_emb = {
@@ -164,6 +173,7 @@ def main() -> None:
             concat=cfg.concat,
             normalize_output=True,
             num_relation_bases=args.num_relation_bases,
+            neighbor_aggr=cfg.neighbor_aggr,
         )
         train_unsupervised(
             model,
