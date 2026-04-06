@@ -38,6 +38,40 @@ Investigate why semantic relation embeddings (OpenAI embeddings of relation glos
 
 ---
 
+## Full DRKG (`drkg.tsv`) — Slurm `drkg_full_experiments_array`
+
+End-to-end link prediction on the **full** DRKG graph loaded from repo-root `drkg.tsv` (no `max_edges` cap). **Split:** `--split-protocol edge` (edge-disjoint train / val / test). **Training:** 100 epochs, `in_dim=64`, `decoder=dot`, `negatives_per_pos=20`, global negative sampling. **Edge-aware runs** use `--edge-relation-mode film`, SapBERT relation cache `cache/drkg-relations-sapbert.pt`, and `--embedding-model sapbert` unless noted.
+
+Metrics below are taken from each run’s **`results/slurm/*.json`** (`val_metrics` / `test_metrics` aggregates). Bucketed metrics (low / medium / high relation-diversity) are inside the same JSON files.
+
+### Slurm array 3236721 (2026-04-06)
+
+Prepared-dataset cache **`cache/drkg-prepared_edge_s42.pkl`** and **seed 42** were used for this submission (faster startup vs rebuilding PyG data on every task). One row per `scripts/slurm/drkg_full_experiments_array.slurm` array task (0–3).
+
+| Task | Method | Neighbor agg | Val ROC-AUC | Test ROC-AUC | Test AP | Test H@10 | GPU | Result file |
+|------|--------|--------------|-------------|--------------|---------|-----------|-----|-------------|
+| 0 | `baseline_sage` | mean | 0.8544 | 0.8548 | 0.2099 | 0.9428 | L40S | `results/slurm/drkg_full_bsage_mean_3236721_0.json` |
+| 1 | `baseline_sage` | max (pool) | 0.8760 | 0.8757 | 0.2314 | 0.9564 | L40S | `results/slurm/drkg_full_bsage_pool_3236721_1.json` |
+| 2 | `edge_aware_sage` (FiLM) | mean | 0.9212 | 0.9210 | 0.4246 | 0.9754 | H100 NVL | `results/slurm/drkg_full_easage_film_mean_3236721_2.json` |
+| 3 | `edge_aware_sage` (FiLM) | max (pool) | 0.9246 | 0.9245 | 0.4170 | 0.9790 | H100 NVL | `results/slurm/drkg_full_easage_film_pool_3236721_3.json` |
+
+**Slurm job IDs:** `3236721_0` … `3236721_3` (see `logs/slurm/drkg-full-3236721_*.err` and `logs/slurm/run-drkg-3236721_*.log`).
+
+### Slurm array 3236475 (2026-04-05→06)
+
+Same sweep template; **tasks 0–1** (baselines only) finished with JSON on disk. **Tasks 2–3** (edge-aware FiLM on P100) were still running later; **add two rows here** when `results/slurm/drkg_full_easage_film_mean_3236475_2.json` and `results/slurm/drkg_full_easage_film_pool_3236475_3.json` exist.
+
+| Task | Method | Neighbor agg | Val ROC-AUC | Test ROC-AUC | Test AP | Test H@10 | GPU | Result file |
+|------|--------|--------------|-------------|--------------|---------|-----------|-----|-------------|
+| 0 | `baseline_sage` | mean | 0.8538 | 0.8539 | 0.2076 | 0.9418 | RTX 4090 | `results/slurm/drkg_full_bsage_mean_3236475_0.json` |
+| 1 | `baseline_sage` | max (pool) | 0.8766 | 0.8766 | 0.2424 | 0.9555 | V100 | `results/slurm/drkg_full_bsage_pool_3236475_1.json` |
+| 2 | `edge_aware_sage` (FiLM) | mean | — | — | — | — | (pending) | *(awaiting JSON)* |
+| 3 | `edge_aware_sage` (FiLM) | max (pool) | — | — | — | — | (pending) | *(awaiting JSON)* |
+
+**Slurm job IDs:** baselines `3236475_0`, `3236475_1`; edge-aware FiLM tasks `3236475_2`, `3236475_3` (metrics pending until JSON is written).
+
+---
+
 ## Key Discoveries
 
 ### 1. OpenAI Embeddings Don't Capture Semantic Opposition

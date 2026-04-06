@@ -176,7 +176,7 @@ tail -n 80 logs/slurm/run-drkg-gcn-<jobid>.log
 
 Common issues:
 
-- **Prepared cache missing / metadata mismatch:** Rebuild with `drkg_build_prepared_cache.slurm` using the **same** knobs as training, or align CLI with the stored meta (see error text from `run_gpu_method`).
+- **Prepared cache missing / metadata mismatch:** Rebuild with `drkg_build_prepared_cache.slurm` using the **same** knobs as training, or align CLI with the stored meta (see error text from `run_gpu_method`). Input files are matched by **resolved path and byte size**; a changed `mtime` alone (touch, rsync) does not invalidate the cache.
 - **`torch.cuda.is_available()` false:** Driver / PyTorch CUDA build mismatch; see `scripts/diagnose_gpu_env.sh` and repo notes on reinstalling torch for the cluster.
 - **Invalid Slurm partition:** Edit `#SBATCH --partition` or pass `--partition=...` to `sbatch` for your site.
 
