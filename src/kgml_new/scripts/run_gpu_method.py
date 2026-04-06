@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import sys
 from pathlib import Path
 
 import torch
 
 from kgml_new.config import LinkMLPConfig, Node2VecConfig, TrainConfig
+from kgml_new.logging_config import parse_log_level, setup_kgml_logging
 from kgml_new.data.datasets import (
     compute_relation_diversity_buckets,
     prepare_link_prediction_dataset,
@@ -16,6 +19,11 @@ from kgml_new.data.loaders import (
     PRIMEKG_CSV_SPEC,
     load_graph_csv,
     load_pickled_graph,
+)
+from kgml_new.data.prepared_dataset_cache import (
+    graph_csv_spec_to_dict,
+    input_fingerprint,
+    load_prepared_link_prediction_dataset,
 )
 from kgml_new.embeddings.semantic import (
     DEFAULT_GLOSSARY_PATH,
@@ -39,6 +47,9 @@ from kgml_new.training.node2vec_train import (
     train_node2vec_embeddings_with_validation,
 )
 from kgml_new.training.train_link_mlp import train_link_mlp_with_validation
+from kgml_new.runtime import resolve_device
+
+_LOG = logging.getLogger("kgml_new.scripts.run_gpu_method")
 
 
 def parse_args() -> argparse.Namespace:
@@ -180,6 +191,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--in-dim", type=int, default=64)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Torch device, e.g. cuda, cuda:0, cpu. Default: cuda if available else cpu.",
+    )
+    parser.add_argument(
+        "--require-cuda",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Exit if CUDA is not available (use on GPU Slurm jobs to fail fast).",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Append structured run logs to this file (stderr always receives logs too).",
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        help="Logging level for kgml_new loggers.",
+    )
+    parser.add_argument(
+        "--prepared-dataset-cache",
+        type=Path,
+        default=None,
+        help="Load PyG tensors + split + negatives from export_prepared_link_prediction.py. "
+        "Pass --input as the same graph file used to build the cache (metadata fingerprint).",
+    )
     return parser.parse_args()
 
 
@@ -227,6 +270,40 @@ def build_dataset(args: argparse.Namespace):
         shuffle_relations=args.shuffle_relations,
     )
     return graph, dataset
+
+
+def _resolved_input_format_for_args(args: argparse.Namespace) -> str:
+    if args.input_format != "auto":
+        return str(args.input_format)
+    suffix = args.input_path.suffix.lower()
+    return "pickle" if suffix in {".pkl", ".pickle"} else "csv"
+
+
+def _expected_prepared_cache_meta(args: argparse.Namespace) -> dict:
+    rf = _resolved_input_format_for_args(args)
+    neg_resolved = args.negative_sampling_mode
+    if neg_resolved is None:
+        neg_resolved = "type_matched" if args.split_protocol == "node" else "global"
+    spec_dict = (
+        graph_csv_spec_to_dict(_csv_spec_from_args(args)) if rf == "csv" else None
+    )
+    return {
+        "split_protocol": args.split_protocol,
+        "seed": args.seed,
+        "in_dim": args.in_dim,
+        "val_ratio": 0.1,
+        "test_ratio": 0.1,
+        "negatives_per_pos": args.negatives_per_pos,
+        "decoder": args.decoder,
+        "shuffle_relations": args.shuffle_relations,
+        "add_self_loops": False,
+        "max_edges": args.max_edges,
+        "negative_sampling_mode_resolved": neg_resolved,
+        "negative_sampling_mode_cli": args.negative_sampling_mode,
+        "resolved_input_format": rf,
+        "graph_csv_spec": spec_dict,
+        "input": input_fingerprint(Path(args.input_path).resolve()),
+    }
 
 
 def history_dict(history) -> dict:
@@ -358,10 +435,53 @@ def maybe_train_decoder(
 
 def main() -> None:
     args = parse_args()
+    setup_kgml_logging(log_file=args.log_file, level=parse_log_level(args.log_level))
+    _LOG.info(
+        "run_gpu_method start argv=%s cwd=%s",
+        sys.argv,
+        Path.cwd(),
+    )
     torch.manual_seed(args.seed)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    graph, dataset = build_dataset(args)
+    if args.require_cuda and not torch.cuda.is_available():
+        _LOG.error("CUDA required but torch.cuda.is_available() is False")
+        raise SystemExit(
+            "CUDA required (--require-cuda) but unavailable. "
+            "Use a GPU node, load drivers, and install a CUDA PyTorch wheel."
+        )
+    device = resolve_device(args.device)
+    _LOG.info(
+        "device=%s cuda_available=%s gpu_name=%s",
+        device,
+        torch.cuda.is_available(),
+        torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+    )
+
+    _LOG.info(
+        "phase=data method=%s input=%s max_edges=%s split=%s epochs=%s",
+        args.method,
+        args.input_path,
+        args.max_edges,
+        args.split_protocol,
+        args.epochs,
+    )
+    if args.prepared_dataset_cache is not None:
+        pcache = Path(args.prepared_dataset_cache)
+        if not pcache.is_file():
+            raise SystemExit(f"Prepared dataset cache not found: {pcache}")
+        _LOG.info("phase=data source=prepared_dataset_cache path=%s", pcache)
+        dataset, _ = load_prepared_link_prediction_dataset(
+            pcache,
+            expected_meta=_expected_prepared_cache_meta(args),
+        )
+        graph = dataset.graph
+    else:
+        graph, dataset = build_dataset(args)
+    _LOG.info(
+        "phase=data_done num_train_nodes=%s train_edges=%s",
+        int(dataset.train_data.num_nodes),
+        int(dataset.split.train_pos_edge_index.size(1)),
+    )
     train_data = dataset.train_data
     relation_lookup = dataset.relation_lookup
     split = dataset.split
@@ -431,6 +551,10 @@ def main() -> None:
     }
 
     if args.method == "baseline_sage":
+        _LOG.info(
+            "phase=model baseline_sage neighbor_aggr=%s edge_mode=n/a",
+            args.neighbor_aggr,
+        )
         cfg = TrainConfig(
             epochs=args.epochs, seed=args.seed, neighbor_aggr=args.neighbor_aggr
         )
@@ -442,6 +566,7 @@ def main() -> None:
             dropout=cfg.dropout,
             neighbor_aggr=cfg.neighbor_aggr,
         )
+        _LOG.info("phase=train_start (baseline_sage batched)")
         model, last_epoch, history = train_unsupervised_batched(
             model,
             train_data,
@@ -450,6 +575,7 @@ def main() -> None:
             device=device,
             edge_aware=False,
         )
+        _LOG.info("phase=train_done last_epoch=%s", last_epoch)
         z = compute_node_embeddings(model, train_data, device, edge_aware=False)
         decoder_model, decoder_last_epoch, decoder_history = maybe_train_decoder(
             decoder=args.decoder,
@@ -459,6 +585,7 @@ def main() -> None:
             seed=args.seed,
             device=device,
         )
+        _LOG.info("phase=eval_val (baseline_sage)")
         val_metrics = evaluate_inductive_link_prediction(
             model,
             dataset.full_data,
@@ -472,6 +599,7 @@ def main() -> None:
             decoder_model=decoder_model,
             query_buckets=val_query_buckets,
         )
+        _LOG.info("phase=eval_test (baseline_sage)")
         test_metrics = evaluate_inductive_link_prediction(
             model,
             dataset.full_data,
@@ -558,6 +686,14 @@ def main() -> None:
         output["metrics"] = test_metrics
 
     elif args.method == "edge_aware_sage":
+        _LOG.info(
+            "phase=model edge_aware_sage neighbor_aggr=%s edge_relation_mode=%s "
+            "semantic_cache=%s embedding_resolved=%s",
+            args.neighbor_aggr,
+            args.edge_relation_mode,
+            args.semantic_cache,
+            _resolved_embedding_model(args),
+        )
         cfg = TrainConfig(
             epochs=args.epochs,
             seed=args.seed,
@@ -567,6 +703,7 @@ def main() -> None:
             neighbor_aggr=args.neighbor_aggr,
         )
         edge_dim = cfg.edge_dim
+        _LOG.info("phase=relation_table (edge_aware)")
         relation_table, relation_init = build_edge_aware_relation_table(
             args=args,
             training_graph=dataset.graph,
@@ -584,6 +721,7 @@ def main() -> None:
             device=device,
         )
 
+        _LOG.info("phase=train_start (edge_aware_sage batched)")
         model, last_epoch, history = train_unsupervised_batched(
             model,
             train_data,
@@ -597,6 +735,7 @@ def main() -> None:
             alignment_train_pos_edge_index=train_pos,
             alignment_train_pos_edge_attr=dataset.train_pos_edge_attr,
         )
+        _LOG.info("phase=train_done last_epoch=%s", last_epoch)
         z = compute_node_embeddings(model, train_data, device, edge_aware=True)
         decoder_model, decoder_last_epoch, decoder_history = maybe_train_decoder(
             decoder=args.decoder,
@@ -606,6 +745,7 @@ def main() -> None:
             seed=args.seed,
             device=device,
         )
+        _LOG.info("phase=eval_val (edge_aware_sage)")
         val_metrics = evaluate_inductive_link_prediction(
             model,
             dataset.full_data,
@@ -619,6 +759,7 @@ def main() -> None:
             decoder_model=decoder_model,
             query_buckets=val_query_buckets,
         )
+        _LOG.info("phase=eval_test (edge_aware_sage)")
         test_metrics = evaluate_inductive_link_prediction(
             model,
             dataset.full_data,
@@ -821,7 +962,13 @@ def main() -> None:
         output["metrics"] = output["test_metrics"]
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    _LOG.info("phase=write_json path=%s", args.output.resolve())
     args.output.write_text(json.dumps(output, indent=2))
+    _LOG.info(
+        "run_gpu_method done method=%s test_roc_auc=%s",
+        args.method,
+        output.get("test_metrics", {}).get("roc_auc"),
+    )
     print(json.dumps(output, indent=2))
 
 

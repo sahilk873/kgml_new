@@ -50,6 +50,7 @@ class Node2VecConfig:
     seed: int = 42
     use_amp: bool = True
     grad_clip_norm: float = 1.0
+    early_stop_patience: int = 20
 
 
 @dataclass

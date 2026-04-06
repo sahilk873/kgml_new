@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 
 import numpy as np
 import torch
 from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
 from torch import nn
+
+_LOG = logging.getLogger(__name__)
 
 
 def _to_numpy(x: torch.Tensor | np.ndarray) -> np.ndarray:
@@ -187,6 +190,106 @@ def _bucket_metrics(
     return results
 
 
+def _evaluate_inductive_link_prediction_fullgraph(
+    model: nn.Module,
+    data,
+    *,
+    pos_edge_index: torch.Tensor,
+    neg_edge_index: torch.Tensor,
+    negatives_per_pos: int,
+    device: torch.device,
+    edge_aware: bool,
+    decoder: str = "dot",
+    decoder_model: nn.Module | None = None,
+    batch_size: int = 64,
+    query_buckets: list[str] | None = None,
+) -> dict[str, float] | dict[str, object]:
+    """
+    Same metrics as sampled eval, but one full-graph forward per batch with
+    query edges pruned from the adjacency (no pyg-lib / torch-sparse).
+    """
+    model = model.to(device)
+    model.eval()
+    if decoder_model is not None:
+        decoder_model = decoder_model.to(device)
+        decoder_model.eval()
+
+    x = data.x.to(device)
+    base_edge_index = data.edge_index
+    base_edge_attr = getattr(data, "edge_attr", None)
+    num_nodes = int(data.num_nodes)
+
+    pos_edge_index = pos_edge_index.cpu().long()
+    neg_edge_index = neg_edge_index.cpu().long()
+
+    if pos_edge_index.numel() == 0:
+        empty = {
+            "roc_auc": float("nan"),
+            "average_precision": float("nan"),
+            "hits@1": float("nan"),
+            "hits@3": float("nan"),
+            "hits@10": float("nan"),
+            "bucket_metrics": _bucket_metrics(
+                pos_scores=np.empty((0,), dtype=np.float32),
+                neg_scores=np.empty((0, negatives_per_pos), dtype=np.float32),
+                query_buckets=query_buckets,
+            ),
+        }
+        return empty
+
+    pos_scores_parts: list[torch.Tensor] = []
+    neg_scores_parts: list[torch.Tensor] = []
+
+    for start in range(0, pos_edge_index.size(1), batch_size):
+        end = min(start + batch_size, pos_edge_index.size(1))
+        batch_pos = pos_edge_index[:, start:end]
+        batch_neg = neg_edge_index[:, start * negatives_per_pos : end * negatives_per_pos]
+        edge_label_index = torch.cat([batch_pos, batch_neg], dim=1)
+        supervised_keys = _undirected_edge_keys(edge_label_index, num_nodes).unique()
+
+        if base_edge_index.numel() == 0:
+            pruned_edge_index = base_edge_index.to(device)
+            pruned_edge_attr = None
+        else:
+            edge_keys = _undirected_edge_keys(base_edge_index.cpu(), num_nodes)
+            keep_mask = ~torch.isin(edge_keys, supervised_keys)
+            pruned_edge_index = base_edge_index[:, keep_mask.to(base_edge_index.device)].to(
+                device
+            )
+            pruned_edge_attr = None
+            if base_edge_attr is not None:
+                pruned_edge_attr = base_edge_attr[
+                    keep_mask.to(base_edge_attr.device)
+                ].to(device)
+
+        with torch.no_grad():
+            if edge_aware:
+                z = model(x, pruned_edge_index, pruned_edge_attr)
+            else:
+                z = model(x, pruned_edge_index)
+            eli = edge_label_index.to(device)
+            scores = _score_query_edges(
+                z=z,
+                edge_label_index=eli,
+                decoder=decoder,
+                decoder_model=decoder_model,
+            )
+
+        pos_count = batch_pos.size(1)
+        pos_scores_parts.append(scores[:pos_count].cpu())
+        neg_scores_parts.append(scores[pos_count:].view(pos_count, negatives_per_pos).cpu())
+
+    pos_scores = torch.cat(pos_scores_parts, dim=0).numpy()
+    neg_scores = torch.cat(neg_scores_parts, dim=0).numpy()
+    metrics = grouped_link_prediction_metrics(pos_scores, neg_scores)
+    metrics["bucket_metrics"] = _bucket_metrics(
+        pos_scores=pos_scores,
+        neg_scores=neg_scores,
+        query_buckets=query_buckets,
+    )
+    return metrics
+
+
 def evaluate_inductive_link_prediction(
     model: nn.Module,
     data,
@@ -203,6 +306,26 @@ def evaluate_inductive_link_prediction(
     query_buckets: list[str] | None = None,
 ) -> dict[str, float] | dict[str, object]:
     from torch_geometric.loader import LinkNeighborLoader
+    from torch_geometric.typing import WITH_PYG_LIB, WITH_TORCH_SPARSE
+
+    if not WITH_PYG_LIB and not WITH_TORCH_SPARSE:
+        _LOG.warning(
+            "Neighbor sampling backend unavailable; using full-graph inductive eval "
+            "(query edges pruned from adjacency per batch)."
+        )
+        return _evaluate_inductive_link_prediction_fullgraph(
+            model=model,
+            data=data,
+            pos_edge_index=pos_edge_index,
+            neg_edge_index=neg_edge_index,
+            negatives_per_pos=negatives_per_pos,
+            device=device,
+            edge_aware=edge_aware,
+            decoder=decoder,
+            decoder_model=decoder_model,
+            batch_size=batch_size,
+            query_buckets=query_buckets,
+        )
 
     model = model.to(device)
     model.eval()

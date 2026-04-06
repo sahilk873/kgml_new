@@ -47,6 +47,51 @@ Semantic prompts use `relation_glossary.tsv` for DRKG-style sourced predicates a
 Semantic caches keep the full OpenAI embedding width; the edge-aware model learns a projection into the configured message-space `edge_dim`.
 Legacy semantic caches saved before the full-width change are automatically regenerated when reused.
 
+### GPU and CUDA alignment (when the venv “does not match” the GPU)
+
+Symptoms include: `torch.cuda.is_available()` is false on a GPU node, CUDA kernel errors, `CUDA driver version is insufficient`, failed loads of `torch_scatter`/`torch_sparse`/`pyg_lib` `.so` files, or training that only ever uses CPU.
+
+**Root causes (typical on clusters):**
+
+1. **Wrong node** — venv is fine but the job/login session has no GPU (`nvidia-smi` missing or “no devices”). Run training on a GPU partition and request a GPU.
+2. **CPU-only PyTorch** — `pip install torch` resolved to a CPU wheel. Install the CUDA build your site documents (PyTorch “Start locally” picker: Linux + Pip + your CUDA tag).
+3. **CUDA tag vs driver** — Wheels are labeled `+cu118`, `+cu121`, `+cu124`, `+cu130`, etc. The **NVIDIA driver** on the node must be **new enough** for that PyTorch build (see [PyTorch compatibility](https://pytorch.org/get-started/locally/)). If the driver is too old, install an older `cuXXX` torch, or use a newer driver / different queue.
+4. **PyG extensions out of sync** — After **any** torch reinstall, reinstall `pyg_lib`, `torch_scatter`, and `torch_sparse` from the PyG index that matches `torch.__version__` (same `+cu…` suffix). Mismatch gives import errors or subtle runtime failures.
+5. **Filesystem / OS mismatch** — A `.venv` copied from another OS or very old `glibc` can load the wrong binaries. Prefer creating the venv on the **same OS family** as the GPU nodes, or use a container/conda stack from the cluster docs.
+
+**What to run (on a GPU node, venv active):**
+
+```bash
+source .venv/bin/activate
+./scripts/diagnose_gpu_env.sh
+```
+
+**Slurm (full DRKG sweep, one GPU per array task):** from repo root, adjust `#SBATCH` partition/account/mem in `scripts/slurm/drkg_full_experiments_array.slurm`, then:
+
+```bash
+sbatch scripts/slurm/drkg_full_experiments_array.slurm
+# or: ./scripts/slurm/submit_drkg_full_array.sh
+./scripts/slurm/monitor_slurm_jobs.sh JOBID
+```
+
+Runs baseline GraphSAGE (mean + max pool) and edge-aware FiLM (mean + max) with `--log-file logs/slurm/run-drkg-${JOB}_${TASK}.log` and `--require-cuda`. Set `REL_CACHE` (default `cache/drkg-relations-sapbert.pt`) before `sbatch` if needed.
+
+If Slurm exits immediately with `torch.cuda.is_available() is False` while `nvidia-smi` works, your pip PyTorch build is likely **too new for the node driver** (e.g. `+cu130` on a CUDA 12.8 driver). Reinstall once from the venv:
+
+```bash
+source .venv/bin/activate
+bash scripts/reinstall_torch_cu124.sh
+```
+
+The batch script now checks CUDA before loading DRKG so jobs fail fast with that hint.
+
+If CUDA is available but PyG extensions fail, reinstall them after torch is correct:
+
+```bash
+pip uninstall -y pyg_lib torch_scatter torch_sparse 2>/dev/null || true
+./scripts/install_pyg_extensions.sh
+```
+
 Edge-aware methods support three relation-control modes:
 
 - `concat`: baseline path, projected relation embedding is concatenated into the message

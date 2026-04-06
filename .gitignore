@@ -18,6 +18,10 @@ results/
 cache/
 =*
 
+# Large archives (local downloads; do not commit)
+drkg.tar.gz
+*.tar.gz
+
 # Data files (download using scripts/setup_hpc.sh)
 /kg.csv
 /drkg.tsv

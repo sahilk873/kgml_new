@@ -15,7 +15,7 @@ GraphSAGE training defaults to mini-batch neighbor sampling via `LinkNeighborLoa
 
 No Kedro. Intended for graphs built from **PrimeKG** or any **NetworkX** graph with relation attributes on edges.
 
-**Where to read next:** step-by-step experiment procedures, split protocols, and CLI reference are in [`EXPERIMENTS.md`](EXPERIMENTS.md). Conventions for agents and maintainers (caches, APIs, caveats) are in [`AGENTS.md`](AGENTS.md).
+**Where to read next:** step-by-step experiment procedures, split protocols, and CLI reference are in [`EXPERIMENTS.md`](EXPERIMENTS.md). Conventions for agents and maintainers (caches, APIs, caveats) are in [`AGENTS.md`](AGENTS.md). **DRKG Slurm** (prepared cache, GPU sweep, extra method jobs, monitoring) is documented in [`scripts/slurm/README.md`](scripts/slurm/README.md).
 
 ## Install
 

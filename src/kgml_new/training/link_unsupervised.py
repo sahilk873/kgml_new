@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from kgml_new.models.edge_aware_sage import (
 )
 from kgml_new.training.history import TrainingHistory
 from kgml_new.io.artifacts import torch_load_checkpoint, torch_save_checkpoint
+
+_LOG = logging.getLogger("kgml_new.training.link_unsupervised")
 
 
 def _build_canonical_edge_relation_lookup(
@@ -250,9 +253,10 @@ def _train_unsupervised_fullgraph(
         if ckpt.get("optimizer_state_dict"):
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         start_epoch = int(ckpt.get("epoch", -1)) + 1
-        print(
-            f"Resuming full-graph training from epoch {start_epoch}"
-            f" (checkpoint epoch was {ckpt.get('epoch')})"
+        _LOG.info(
+            "Resuming full-graph training from epoch %s (checkpoint epoch was %s)",
+            start_epoch,
+            ckpt.get("epoch"),
         )
 
     history = TrainingHistory(edge_aware=edge_aware, num_neighbors=None)
@@ -260,7 +264,9 @@ def _train_unsupervised_fullgraph(
 
     last_epoch = start_epoch - 1
     if start_epoch >= config.epochs:
-        print(f"Training already at epoch >= {config.epochs}; skipping training loop.")
+        _LOG.info(
+            "Training already at epoch >= %s; skipping training loop.", config.epochs
+        )
 
     for epoch in range(start_epoch, config.epochs):
         model.train()
@@ -347,7 +353,13 @@ def _train_unsupervised_fullgraph(
                 if val_auc is not None and val_ap is not None
                 else ""
             )
-            print(f"epoch {epoch:04d} loss={avg_loss:.4f}{val_str} device={device}")
+            _LOG.info(
+                "epoch %04d loss=%.4f%s device=%s",
+                epoch,
+                avg_loss,
+                val_str,
+                device,
+            )
 
         if ckpt_path is not None and save_every_epochs > 0:
             if (epoch + 1) % save_every_epochs == 0 or epoch == config.epochs - 1:
@@ -361,7 +373,7 @@ def _train_unsupervised_fullgraph(
 
     if history_path:
         history.save(history_path)
-        print(history.summary())
+        _LOG.info("%s", history.summary())
 
     return model, last_epoch, history
 
@@ -395,7 +407,7 @@ def _train_unsupervised_batched(
     from torch_geometric.typing import WITH_PYG_LIB, WITH_TORCH_SPARSE
 
     if not WITH_PYG_LIB and not WITH_TORCH_SPARSE:
-        print(
+        _LOG.warning(
             "Neighbor sampling backend unavailable; falling back to full-graph training."
         )
         return _train_unsupervised_fullgraph(
@@ -433,7 +445,7 @@ def _train_unsupervised_batched(
             )
         else:
             if not alignment_batched_skip_warned:
-                print(
+                _LOG.warning(
                     "semantic_alignment_lambda > 0 but alignment_train_pos_edge_index/"
                     "alignment_train_pos_edge_attr not provided; skipping alignment in "
                     "batched training."
@@ -463,9 +475,10 @@ def _train_unsupervised_batched(
         if ckpt.get("optimizer_state_dict"):
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         start_epoch = int(ckpt.get("epoch", -1)) + 1
-        print(
-            f"Resuming batched training from epoch {start_epoch}"
-            f" (checkpoint epoch was {ckpt.get('epoch')})"
+        _LOG.info(
+            "Resuming batched training from epoch %s (checkpoint epoch was %s)",
+            start_epoch,
+            ckpt.get("epoch"),
         )
 
     edge_labels = torch.ones(pos.size(1), dtype=torch.float32)
@@ -486,7 +499,9 @@ def _train_unsupervised_batched(
 
     last_epoch = start_epoch - 1
     if start_epoch >= config.epochs:
-        print(f"Training already at epoch >= {config.epochs}; skipping training loop.")
+        _LOG.info(
+            "Training already at epoch >= %s; skipping training loop.", config.epochs
+        )
 
     for epoch in range(start_epoch, config.epochs):
         model.train()
@@ -567,7 +582,13 @@ def _train_unsupervised_batched(
                 if val_auc is not None and val_ap is not None
                 else f" batches={num_batches}"
             )
-            print(f"epoch {epoch:04d} loss={avg_loss:.4f}{val_str} device={device}")
+            _LOG.info(
+                "epoch %04d loss=%.4f%s device=%s",
+                epoch,
+                avg_loss,
+                val_str,
+                device,
+            )
 
         if ckpt_path is not None and save_every_epochs > 0:
             if (epoch + 1) % save_every_epochs == 0 or epoch == config.epochs - 1:
@@ -585,7 +606,7 @@ def _train_unsupervised_batched(
 
     if history_path:
         history.save(history_path)
-        print(history.summary())
+        _LOG.info("%s", history.summary())
 
     return model, last_epoch, history
 
