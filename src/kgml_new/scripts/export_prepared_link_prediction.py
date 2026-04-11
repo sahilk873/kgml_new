@@ -39,6 +39,12 @@ from kgml_new.data.prepared_dataset_cache import (
 )
 
 
+def _held_out_relations_from_args(args: argparse.Namespace) -> list[str] | None:
+    names = [str(x).strip() for x in getattr(args, "held_out_relations", []) or []]
+    names = [x for x in names if x]
+    return names or None
+
+
 def _spec_from_args(args: argparse.Namespace) -> GraphCSVSpec:
     return GraphCSVSpec(
         source_col=args.source_col,
@@ -104,6 +110,13 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
     )
+    p.add_argument(
+        "--held-out-relations",
+        nargs="*",
+        default=[],
+        metavar="REL",
+        help="Same as run_gpu_method: relation names excluded from training positives.",
+    )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--in-dim", type=int, default=64)
     p.add_argument("--val-ratio", type=float, default=0.1)
@@ -145,6 +158,7 @@ def main() -> None:
         decoder=args.decoder,
         shuffle_relations=args.shuffle_relations,
         add_self_loops=args.add_self_loops,
+        held_out_relations=_held_out_relations_from_args(args),
     )
     _log(
         f"Prepared: split={dataset.split_protocol} neg_mode={dataset.negative_sampling_mode} "

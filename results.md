@@ -37,7 +37,6 @@ Investigate why semantic relation embeddings (OpenAI embeddings of relation glos
 | film_random | 0.6013 | 0.5954 | +6.1% |
 
 ---
-
 ## Full DRKG (`drkg.tsv`) — Slurm `drkg_full_experiments_array`
 
 End-to-end link prediction on the **full** DRKG graph loaded from repo-root `drkg.tsv` (no `max_edges` cap). **Split:** `--split-protocol edge` (edge-disjoint train / val / test). **Training:** 100 epochs, `in_dim=64`, `decoder=dot`, `negatives_per_pos=20`, global negative sampling. **Edge-aware runs** use `--edge-relation-mode film`, SapBERT relation cache `cache/drkg-relations-sapbert.pt`, and `--embedding-model sapbert` unless noted.
@@ -69,6 +68,147 @@ Same sweep template; **tasks 0–1** (baselines only) finished with JSON on disk
 | 3 | `edge_aware_sage` (FiLM) | max (pool) | — | — | — | — | (pending) | *(awaiting JSON)* |
 
 **Slurm job IDs:** baselines `3236475_0`, `3236475_1`; edge-aware FiLM tasks `3236475_2`, `3236475_3` (metrics pending until JSON is written).
+
+### Slurm array 3237420 (2026-04-07, node split)
+
+This batch switched to **`--split-protocol node`** with prepared cache **`cache/drkg-prepared_node_s42.pkl`** (still seed 42, 100 epochs, full DRKG input). Because node-split is harder than edge-split, absolute AUC/Hits values are not directly comparable to the edge-split tables above.
+
+| Task | Method | Neighbor agg | Val ROC-AUC | Test ROC-AUC | Test AP | Test H@10 | GPU | Result file |
+|------|--------|--------------|-------------|--------------|---------|-----------|-----|-------------|
+| 0 | `baseline_sage` | mean | 0.8168 | 0.8215 | 0.1489 | 0.9203 | L40S | `results/slurm/drkg_full_bsage_mean_3237420_0.json` |
+| 1 | `baseline_sage` | max (pool) | 0.7833 | 0.7832 | 0.1187 | 0.8885 | RTX 4090 | `results/slurm/drkg_full_bsage_pool_3237420_1.json` |
+| 2 | `edge_aware_sage` (FiLM) | mean | 0.9105 | 0.9114 | 0.4166 | 0.9560 | RTX 4090 | `results/slurm/drkg_full_easage_film_mean_3237420_2.json` |
+| 3 | `edge_aware_sage` (FiLM) | max (pool) | — | — | — | — | P100 (running) | `results/slurm/drkg_full_easage_film_pool_3237420_3.json` *(pending)* |
+
+**Live status snapshot (2026-04-07 09:47 EDT):**
+- Running: `3237420_3` on `gput035` (P100), at `epoch 0060`, `loss=0.6432`, `batches=10857`.
+- Recent training trajectory (`3237420_3`): epoch 0 `0.6469` -> 10 `0.6439` -> 20 `0.6436` -> 30 `0.6434` -> 40 `0.6434` -> 50 `0.6433` -> 60 `0.6432`.
+- Compared to baseline in the same node-split batch, `edge_aware_sage` (task 2) is already substantially better (`0.9114` test ROC-AUC vs `0.8215` and `0.7832` for baseline mean/max).
+
+### Additional method sweep (GCN / Node2Vec / gated / basis)
+
+These runs were also completed and written to `results/slurm`, but were not included in the earlier full-DRKG array tables above. They are all full-DRKG, **`split_protocol=edge`** runs.
+
+| Method family | Config | Test ROC-AUC | Test AP | Test H@10 | Result file |
+|--------------|--------|--------------|---------|-----------|-------------|
+| `baseline_gcn` | baseline GCN | 0.6165 | 0.0703 | 0.6424 | `results/slurm/drkg_baseline_gcn_3237374.json` |
+| `node2vec` | node2vec embeddings | 0.9121 | 0.4362 | n/a* | `results/slurm/drkg_node2vec_3237375.json` |
+| `edge_aware_sage` | `edge_relation_mode=gated`, `neighbor_aggr=mean` | 0.9146 | 0.4156 | 0.9669 | `results/slurm/drkg_edge_aware_gated_mean_3237376.json` |
+| `edge_aware_sage` | `edge_relation_mode=basis_mixture`, `num_relation_bases=4`, `neighbor_aggr=mean` | 0.9128 | 0.4137 | 0.9634 | `results/slurm/drkg_edge_aware_basis_mixture_b4_3237377.json` |
+
+\* `drkg_node2vec_3237375.json` records ROC-AUC and AP in `test_metrics`, but does not include `hits@k` fields in this output artifact.
+
+**Quick read:**
+- `baseline_gcn` is substantially weaker than the others on this setup.
+- `node2vec`, `gated`, and `basis_mixture` are all strong and close; in this batch, `gated` is the top performer by a small margin on ROC-AUC.
+
+## Full DRKG Scoreboard (all full runs to date)
+
+This rollup consolidates all full-graph DRKG runs currently recorded under `results/slurm/`.
+
+### Edge split (`split_protocol=edge`)
+
+| Group | Method/config | Test ROC-AUC | Status | Result file |
+|------|----------------|--------------|--------|-------------|
+| 3236721 | `baseline_sage` mean | 0.8548 | complete | `results/slurm/drkg_full_bsage_mean_3236721_0.json` |
+| 3236721 | `baseline_sage` max (pool) | 0.8757 | complete | `results/slurm/drkg_full_bsage_pool_3236721_1.json` |
+| 3236721 | `edge_aware_sage` FiLM mean | 0.9210 | complete | `results/slurm/drkg_full_easage_film_mean_3236721_2.json` |
+| 3236721 | `edge_aware_sage` FiLM max (pool) | **0.9245** | complete | `results/slurm/drkg_full_easage_film_pool_3236721_3.json` |
+| 3236475 | `baseline_sage` mean | 0.8539 | complete | `results/slurm/drkg_full_bsage_mean_3236475_0.json` |
+| 3236475 | `baseline_sage` max (pool) | 0.8766 | complete | `results/slurm/drkg_full_bsage_pool_3236475_1.json` |
+| 3236475 | `edge_aware_sage` FiLM mean | — | pending JSON | `results/slurm/drkg_full_easage_film_mean_3236475_2.json` *(missing)* |
+| 3236475 | `edge_aware_sage` FiLM max (pool) | — | pending JSON | `results/slurm/drkg_full_easage_film_pool_3236475_3.json` *(missing)* |
+| 3237374 | `baseline_gcn` | 0.6165 | complete | `results/slurm/drkg_baseline_gcn_3237374.json` |
+| 3237375 | `node2vec` | 0.9121 | complete | `results/slurm/drkg_node2vec_3237375.json` |
+| 3237376 | `edge_aware_sage` gated mean | 0.9146 | complete | `results/slurm/drkg_edge_aware_gated_mean_3237376.json` |
+| 3237377 | `edge_aware_sage` basis_mixture (b=4) mean | 0.9128 | complete | `results/slurm/drkg_edge_aware_basis_mixture_b4_3237377.json` |
+
+### Node split (`split_protocol=node`)
+
+| Group | Method/config | Test ROC-AUC | Status | Result file |
+|------|----------------|--------------|--------|-------------|
+| 3237420 | `baseline_sage` mean | 0.8215 | complete | `results/slurm/drkg_full_bsage_mean_3237420_0.json` |
+| 3237420 | `baseline_sage` max (pool) | 0.7832 | complete | `results/slurm/drkg_full_bsage_pool_3237420_1.json` |
+| 3237420 | `edge_aware_sage` FiLM mean | 0.9114 | complete | `results/slurm/drkg_full_easage_film_mean_3237420_2.json` |
+| 3237420 | `edge_aware_sage` FiLM max (pool) | — | running | `results/slurm/drkg_full_easage_film_pool_3237420_3.json` *(pending)* |
+
+### Node semantic backfill (`3240514`) — complete
+
+Missing node-split semantic max runs were backfilled with fixed settings (`seed=42`, `epochs=100`, `in_dim=64`, `decoder=dot`, `negatives_per_pos=20`, prepared cache `cache/drkg-prepared_node_s42.pkl`, SapBERT relation cache).
+
+| Task | Method/config | Test ROC-AUC | Test AP | Test H@10 | Result file |
+|------|----------------|--------------|---------|-----------|-------------|
+| 3240514_0 | `edge_aware_sage` FiLM max (pool), semantic | 0.9191 | 0.4057 | 0.9720 | `results/slurm/drkg_node_semantic_film_pool_3240514_0.json` |
+| 3240514_1 | `edge_aware_sage` concat max (pool), semantic | **0.9203** | 0.4015 | **0.9727** | `results/slurm/drkg_node_semantic_concat_pool_3240514_1.json` |
+| 3240514_2 | `edge_aware_sage` gated max (pool), semantic | 0.9180 | 0.3988 | 0.9716 | `results/slurm/drkg_node_semantic_gated_pool_3240514_2.json` |
+| 3240514_3 | `edge_aware_sage` basis_mixture max (pool), semantic | 0.9182 | 0.4010 | 0.9715 | `results/slurm/drkg_node_semantic_basis_mixture_pool_3240514_3.json` |
+
+Quick read: all four variants are tightly clustered on node split; concat is highest on ROC-AUC/H@10 while FiLM is highest on AP.
+
+### Node semantic/random dim sweep (`3242062`) — in progress
+
+This is the patched rerun of the 36-task node-split matrix:
+`baseline_sage x {mean,max} x {128,256}` plus
+`edge_aware_sage x {concat,gated,basis_mixture,film} x {mean,max} x {128,256} x {sapbert,random}`.
+
+Status snapshot at update time: **16 complete / 8 running / 12 pending**.
+
+#### Completed entries (16)
+
+| Task | Method/config | Test ROC-AUC | Test AP | Test H@10 | Result file |
+|------|----------------|--------------|---------|-----------|-------------|
+| 3242062_0 | `baseline_sage` mean, d128 | 0.8390 | 0.1591 | 0.9338 | `results/slurm/drkg_node_semrand_baseline_sage_mean_d128_3242062_0.json` |
+| 3242062_1 | `baseline_sage` max, d128 | 0.7911 | 0.1258 | 0.9019 | `results/slurm/drkg_node_semrand_baseline_sage_max_d128_3242062_1.json` |
+| 3242062_2 | `baseline_sage` mean, d256 | 0.8531 | 0.1725 | 0.9464 | `results/slurm/drkg_node_semrand_baseline_sage_mean_d256_3242062_2.json` |
+| 3242062_3 | `baseline_sage` max, d256 | 0.8006 | 0.1374 | 0.9139 | `results/slurm/drkg_node_semrand_baseline_sage_max_d256_3242062_3.json` |
+| 3242062_4 | `edge_aware_sage` concat mean, d128, sapbert | 0.9185 | 0.4121 | 0.9698 | `results/slurm/drkg_node_semrand_edge_aware_concat_mean_d128_sapbert_3242062_4.json` |
+| 3242062_5 | `edge_aware_sage` concat mean, d128, random | 0.9111 | 0.4074 | 0.9597 | `results/slurm/drkg_node_semrand_edge_aware_concat_mean_d128_random_3242062_5.json` |
+| 3242062_6 | `edge_aware_sage` concat mean, d256, sapbert | 0.9185 | 0.4110 | 0.9713 | `results/slurm/drkg_node_semrand_edge_aware_concat_mean_d256_sapbert_3242062_6.json` |
+| 3242062_7 | `edge_aware_sage` concat mean, d256, random | 0.9141 | 0.4108 | 0.9631 | `results/slurm/drkg_node_semrand_edge_aware_concat_mean_d256_random_3242062_7.json` |
+| 3242062_8 | `edge_aware_sage` concat max, d128, sapbert | **0.9211** | 0.4069 | **0.9719** | `results/slurm/drkg_node_semrand_edge_aware_concat_max_d128_sapbert_3242062_8.json` |
+| 3242062_9 | `edge_aware_sage` concat max, d128, random | 0.9165 | 0.4055 | 0.9657 | `results/slurm/drkg_node_semrand_edge_aware_concat_max_d128_random_3242062_9.json` |
+| 3242062_10 | `edge_aware_sage` concat max, d256, sapbert | 0.9199 | 0.4073 | 0.9706 | `results/slurm/drkg_node_semrand_edge_aware_concat_max_d256_sapbert_3242062_10.json` |
+| 3242062_11 | `edge_aware_sage` concat max, d256, random | 0.9165 | 0.4084 | 0.9639 | `results/slurm/drkg_node_semrand_edge_aware_concat_max_d256_random_3242062_11.json` |
+| 3242062_13 | `edge_aware_sage` gated mean, d128, random | 0.9017 | 0.4096 | 0.9393 | `results/slurm/drkg_node_semrand_edge_aware_gated_mean_d128_random_3242062_13.json` |
+| 3242062_15 | `edge_aware_sage` gated mean, d256, random | 0.9186 | **0.4276** | 0.9659 | `results/slurm/drkg_node_semrand_edge_aware_gated_mean_d256_random_3242062_15.json` |
+| 3242062_16 | `edge_aware_sage` gated max, d128, sapbert | 0.9185 | 0.3952 | 0.9712 | `results/slurm/drkg_node_semrand_edge_aware_gated_max_d128_sapbert_3242062_16.json` |
+| 3242062_17 | `edge_aware_sage` gated max, d128, random | 0.9196 | 0.4018 | 0.9709 | `results/slurm/drkg_node_semrand_edge_aware_gated_max_d128_random_3242062_17.json` |
+
+### Context-injection ablation complete (`3238991` edge, `3238992` node)
+
+This sweep is the full 16-run matrix:  
+`{concat, gated, basis_mixture, film} x {random, shuffled_semantic} x {edge, node}`  
+with fixed settings (`SEED=42`, `EPOCHS=100`, `IN_DIM=64`, `DECODER=dot`, `NEGATIVES_PER_POS=20`) and prepared caches.
+
+#### Edge split (`3238991`) — all complete
+
+| Mode | Random (ROC / AP / H@10) | Shuffled-semantic (ROC / AP / H@10) | Result files |
+|------|---------------------------|---------------------------------------|-------------|
+| concat | 0.9130 / 0.4200 / 0.9659 | 0.9122 / 0.4206 / 0.9653 | `drkg_ctxabl_edge_concat_random_3238991_0.json`, `drkg_ctxabl_edge_concat_shuffled_semantic_3238991_1.json` |
+| gated | 0.9206 / 0.4228 / 0.9700 | 0.9202 / 0.4239 / 0.9695 | `drkg_ctxabl_edge_gated_random_3238991_2.json`, `drkg_ctxabl_edge_gated_shuffled_semantic_3238991_3.json` |
+| basis_mixture | 0.9217 / 0.4282 / 0.9732 | 0.9219 / 0.4279 / 0.9727 | `drkg_ctxabl_edge_basis_mixture_random_3238991_4.json`, `drkg_ctxabl_edge_basis_mixture_shuffled_semantic_3238991_5.json` |
+| film | 0.9209 / 0.4231 / 0.9744 | 0.9216 / 0.4235 / 0.9746 | `drkg_ctxabl_edge_film_random_3238991_6.json`, `drkg_ctxabl_edge_film_shuffled_semantic_3238991_7.json` |
+
+#### Node split (`3238992`) — all complete
+
+| Mode | Random (ROC / AP / H@10) | Shuffled-semantic (ROC / AP / H@10) | Result files |
+|------|---------------------------|---------------------------------------|-------------|
+| concat | 0.9075 / 0.4104 / 0.9543 | 0.9087 / 0.4107 / 0.9531 | `drkg_ctxabl_node_concat_random_3238992_0.json`, `drkg_ctxabl_node_concat_shuffled_semantic_3238992_1.json` |
+| gated | 0.9066 / 0.4171 / 0.9470 | 0.9044 / 0.4201 / 0.9441 | `drkg_ctxabl_node_gated_random_3238992_2.json`, `drkg_ctxabl_node_gated_shuffled_semantic_3238992_3.json` |
+| basis_mixture | 0.9021 / 0.4114 / 0.9415 | 0.8990 / 0.4103 / 0.9355 | `drkg_ctxabl_node_basis_mixture_random_3238992_4.json`, `drkg_ctxabl_node_basis_mixture_shuffled_semantic_3238992_5.json` |
+| film | 0.9162 / 0.4197 / 0.9618 | 0.9168 / 0.4197 / 0.9628 | `drkg_ctxabl_node_film_random_3238992_6.json`, `drkg_ctxabl_node_film_shuffled_semantic_3238992_7.json` |
+
+**Ablation readout:**
+- Random vs shuffled-semantic are very close in most matched pairs.
+- Best edge ROC in this sweep: `basis_mixture_shuffled_semantic` (0.9219), essentially tied with `basis_mixture_random` (0.9217).
+- Best node ROC in this sweep: `film_shuffled_semantic` (0.9168), marginally above `film_random` (0.9162).
+
+### Current bests
+
+- Best **edge-split** full run so far: `edge_aware_sage` FiLM max (`3236721_3`) at **0.9245** test ROC-AUC.
+- Best **node-split** full run so far: `edge_aware_sage` FiLM mean (`3237420_2`) at **0.9114** test ROC-AUC.
+- `node2vec` is competitive on edge split (**0.9121**) and close to edge-aware gated/basis variants.
+- `baseline_gcn` underperforms substantially in this setup.
 
 ---
 

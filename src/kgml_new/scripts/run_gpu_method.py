@@ -34,7 +34,15 @@ from kgml_new.embeddings.semantic import (
 from kgml_new.models.baseline_gcn import BaselineGCN
 from kgml_new.models.baseline_sage import NEIGHBOR_AGGREGATIONS, BaselineGraphSAGE
 from kgml_new.models.edge_aware_sage import EDGE_RELATION_MODES, build_edge_aware_model
+from kgml_new.eval.ood_difficulty import (
+    OODDifficultyConfig,
+    build_ood_json_payload,
+    compute_ood_difficulty_for_split,
+    strip_scores_from_metrics,
+    write_edge_predictions_csv,
+)
 from kgml_new.training.eval import (
+    compute_relation_holdout_metrics,
     evaluate_inductive_link_prediction,
     link_prediction_dot_product,
 )
@@ -105,6 +113,14 @@ def parse_args() -> argparse.Namespace:
         "--shuffle-relations",
         action=argparse.BooleanOptionalAction,
         default=False,
+    )
+    parser.add_argument(
+        "--held-out-relations",
+        nargs="*",
+        default=[],
+        metavar="REL",
+        help="Relation type names held out from training positives (zero-shot at val/test). "
+        "Repeat flag or pass multiple names.",
     )
     parser.add_argument(
         "--semantic",
@@ -223,6 +239,55 @@ def parse_args() -> argparse.Namespace:
         help="Load PyG tensors + split + negatives from export_prepared_link_prediction.py. "
         "Pass --input as the same graph file used to build the cache (metadata fingerprint).",
     )
+    parser.add_argument(
+        "--compute-ood-difficulty",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Post-hoc OOD difficulty stratified metrics (requires evaluator scores).",
+    )
+    parser.add_argument(
+        "--save-edge-predictions",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Write per-edge CSV under --ood-output-dir (use with --compute-ood-difficulty).",
+    )
+    parser.add_argument(
+        "--ood-buckets",
+        choices=("quantile", "fixed"),
+        default="quantile",
+        help="Bucket mode: quantile (default); fixed is not implemented and falls back to quantile.",
+    )
+    parser.add_argument(
+        "--ood-num-quantile-buckets",
+        type=int,
+        default=3,
+        help="Number of quantile buckets (e.g. 3 for tertiles).",
+    )
+    parser.add_argument(
+        "--ood-tail-quantile",
+        type=float,
+        default=0.1,
+        help="Tail mass for nodefreq_tail / nodefreq_head extremes.",
+    )
+    parser.add_argument(
+        "--ood-eval-splits",
+        nargs="+",
+        choices=("val", "test"),
+        default=("val", "test"),
+        help="Which splits to include in OOD JSON and CSV.",
+    )
+    parser.add_argument(
+        "--ood-output-dir",
+        type=Path,
+        default=Path("results/ood"),
+        help="Directory for OOD CSV exports.",
+    )
+    parser.add_argument(
+        "--ood-run-name",
+        type=str,
+        default=None,
+        help="Stem for OOD CSV filename (default: --output stem).",
+    )
     return parser.parse_args()
 
 
@@ -255,6 +320,12 @@ def _load_graph(args: argparse.Namespace):
     )
 
 
+def _held_out_relations_from_args(args: argparse.Namespace) -> list[str] | None:
+    names = [str(x).strip() for x in getattr(args, "held_out_relations", []) or []]
+    names = [x for x in names if x]
+    return names or None
+
+
 def build_dataset(args: argparse.Namespace):
     graph = _load_graph(args)
     dataset = prepare_link_prediction_dataset(
@@ -268,6 +339,7 @@ def build_dataset(args: argparse.Namespace):
         negatives_per_pos=args.negatives_per_pos,
         decoder=args.decoder,
         shuffle_relations=args.shuffle_relations,
+        held_out_relations=_held_out_relations_from_args(args),
     )
     return graph, dataset
 
@@ -287,7 +359,8 @@ def _expected_prepared_cache_meta(args: argparse.Namespace) -> dict:
     spec_dict = (
         graph_csv_spec_to_dict(_csv_spec_from_args(args)) if rf == "csv" else None
     )
-    return {
+    ho = _held_out_relations_from_args(args)
+    meta = {
         "split_protocol": args.split_protocol,
         "seed": args.seed,
         "in_dim": args.in_dim,
@@ -304,6 +377,9 @@ def _expected_prepared_cache_meta(args: argparse.Namespace) -> dict:
         "graph_csv_spec": spec_dict,
         "input": input_fingerprint(Path(args.input_path).resolve()),
     }
+    if ho:
+        meta["held_out_relations"] = sorted(ho)
+    return meta
 
 
 def history_dict(history) -> dict:
@@ -433,6 +509,193 @@ def maybe_train_decoder(
     return decoder_model, decoder_last_epoch, decoder_history
 
 
+def _attach_relation_holdout_block(
+    output: dict,
+    *,
+    dataset,
+    val_metrics: dict | None,
+    test_metrics: dict | None,
+    val_pos: torch.Tensor,
+    test_pos: torch.Tensor,
+) -> None:
+    hid = getattr(dataset, "held_out_relation_ids", None)
+    if not hid or dataset.positive_edge_attr is None:
+        return
+    if val_metrics is None or test_metrics is None:
+        return
+    if "pos_scores" not in val_metrics or "pos_scores" not in test_metrics:
+        _LOG.warning(
+            "Relation holdout metrics skipped: run with scores enabled "
+            "(use --compute-ood-difficulty or held-out relations trigger scores automatically)."
+        )
+        return
+    pos_idx = dataset.positive_edge_index
+    pos_attr = dataset.positive_edge_attr
+    output["relation_holdout"] = {
+        "held_out_relations": sorted(dataset.held_out_relations)
+        if dataset.held_out_relations
+        else [],
+        "held_out_relation_ids": sorted(hid),
+        "val": compute_relation_holdout_metrics(
+            query_pos_edge_index=val_pos,
+            positive_edge_index=pos_idx,
+            positive_edge_attr=pos_attr,
+            held_out_relation_ids=hid,
+            pos_scores=val_metrics["pos_scores"],
+            neg_scores=val_metrics["neg_scores"],
+        ),
+        "test": compute_relation_holdout_metrics(
+            query_pos_edge_index=test_pos,
+            positive_edge_index=pos_idx,
+            positive_edge_attr=pos_attr,
+            held_out_relation_ids=hid,
+            pos_scores=test_metrics["pos_scores"],
+            neg_scores=test_metrics["neg_scores"],
+        ),
+    }
+
+
+def _finalize_eval_and_ood(
+    output: dict,
+    *,
+    val_metrics: dict | None,
+    test_metrics: dict | None,
+    args: argparse.Namespace,
+    dataset,
+    train_pos: torch.Tensor,
+    val_pos: torch.Tensor,
+    val_neg: torch.Tensor,
+    test_pos: torch.Tensor,
+    test_neg: torch.Tensor,
+) -> None:
+    _attach_relation_holdout_block(
+        output,
+        dataset=dataset,
+        val_metrics=val_metrics,
+        test_metrics=test_metrics,
+        val_pos=val_pos,
+        test_pos=test_pos,
+    )
+    if val_metrics is not None:
+        output["val_metrics"] = strip_scores_from_metrics(val_metrics)
+    if test_metrics is not None:
+        output["test_metrics"] = strip_scores_from_metrics(test_metrics)
+        output["metrics"] = output["test_metrics"]
+
+    if not args.compute_ood_difficulty:
+        return
+    if val_metrics is None or test_metrics is None:
+        _LOG.warning("OOD requested but val/test metrics missing; skipping.")
+        return
+    if "pos_scores" not in val_metrics or "pos_scores" not in test_metrics:
+        _LOG.warning("OOD requested but evaluator did not return scores; skipping.")
+        return
+
+    if args.ood_buckets == "fixed":
+        _LOG.warning("--ood-buckets=fixed not implemented; using quantile buckets.")
+
+    ood_cfg = OODDifficultyConfig(
+        num_quantile_buckets=args.ood_num_quantile_buckets,
+        tail_quantile=args.ood_tail_quantile,
+        bucket_mode="quantile",
+    )
+    train_attr = dataset.train_pos_edge_attr
+    num_nodes = int(dataset.train_data.num_nodes)
+    splits_requested = set(args.ood_eval_splits)
+
+    val_block = None
+    test_block = None
+    if "val" in splits_requested:
+        val_block = compute_ood_difficulty_for_split(
+            split_name="val",
+            train_pos_edge_index=train_pos,
+            train_pos_edge_attr=train_attr,
+            full_edge_index=dataset.full_data.edge_index,
+            positive_edge_index=dataset.positive_edge_index,
+            positive_edge_attr=dataset.positive_edge_attr,
+            query_pos_edge_index=val_pos,
+            pos_scores=val_metrics["pos_scores"],
+            neg_scores=val_metrics["neg_scores"],
+            negatives_per_pos=dataset.negatives_per_pos,
+            num_nodes=num_nodes,
+            relation_lookup=dataset.relation_lookup,
+            split_protocol=args.split_protocol,
+            config=ood_cfg,
+        )
+    if "test" in splits_requested:
+        test_block = compute_ood_difficulty_for_split(
+            split_name="test",
+            train_pos_edge_index=train_pos,
+            train_pos_edge_attr=train_attr,
+            full_edge_index=dataset.full_data.edge_index,
+            positive_edge_index=dataset.positive_edge_index,
+            positive_edge_attr=dataset.positive_edge_attr,
+            query_pos_edge_index=test_pos,
+            pos_scores=test_metrics["pos_scores"],
+            neg_scores=test_metrics["neg_scores"],
+            negatives_per_pos=dataset.negatives_per_pos,
+            num_nodes=num_nodes,
+            relation_lookup=dataset.relation_lookup,
+            split_protocol=args.split_protocol,
+            config=ood_cfg,
+        )
+
+    payload = build_ood_json_payload(val_block=val_block, test_block=test_block)
+    payload["config"] = {
+        "ood_buckets": args.ood_buckets,
+        "ood_num_quantile_buckets": args.ood_num_quantile_buckets,
+        "ood_tail_quantile": args.ood_tail_quantile,
+        "ood_eval_splits": list(args.ood_eval_splits),
+    }
+    output["ood_difficulty"] = payload
+
+    if not args.save_edge_predictions:
+        return
+
+    ood_stem = args.ood_run_name or args.output.stem
+    csv_path = Path(args.ood_output_dir) / f"{ood_stem}_edge_predictions.csv"
+    edge_mode = (
+        args.edge_relation_mode
+        if args.method in ("edge_aware_sage", "edge_aware_link_mlp")
+        else None
+    )
+    wrote_any = False
+    if val_block is not None and val_block.get("features") is not None:
+        write_edge_predictions_csv(
+            csv_path,
+            split_name="val",
+            features=val_block["features"],
+            pos_scores=val_metrics["pos_scores"],
+            neg_scores=val_metrics["neg_scores"],
+            query_neg_edge_index=val_neg,
+            negatives_per_pos=dataset.negatives_per_pos,
+            relation_lookup=dataset.relation_lookup,
+            seed=args.seed,
+            model_name=args.method,
+            edge_relation_mode=edge_mode,
+            split_protocol=args.split_protocol,
+            append=False,
+        )
+        wrote_any = True
+    if test_block is not None and test_block.get("features") is not None:
+        write_edge_predictions_csv(
+            csv_path,
+            split_name="test",
+            features=test_block["features"],
+            pos_scores=test_metrics["pos_scores"],
+            neg_scores=test_metrics["neg_scores"],
+            query_neg_edge_index=test_neg,
+            negatives_per_pos=dataset.negatives_per_pos,
+            relation_lookup=dataset.relation_lookup,
+            seed=args.seed,
+            model_name=args.method,
+            edge_relation_mode=edge_mode,
+            split_protocol=args.split_protocol,
+            append=wrote_any,
+        )
+    _LOG.info("phase=ood_csv path=%s", csv_path.resolve())
+
+
 def main() -> None:
     args = parse_args()
     setup_kgml_logging(log_file=args.log_file, level=parse_log_level(args.log_level))
@@ -477,6 +740,9 @@ def main() -> None:
         graph = dataset.graph
     else:
         graph, dataset = build_dataset(args)
+    return_scores = args.compute_ood_difficulty or bool(
+        getattr(dataset, "held_out_relation_ids", None)
+    )
     _LOG.info(
         "phase=data_done num_train_nodes=%s train_edges=%s",
         int(dataset.train_data.num_nodes),
@@ -548,6 +814,12 @@ def main() -> None:
         if args.method
         in ("baseline_sage", "edge_aware_sage", "link_mlp", "edge_aware_link_mlp")
         else None,
+        "held_out_relations": sorted(dataset.held_out_relations)
+        if getattr(dataset, "held_out_relations", None)
+        else [],
+        "held_out_relation_ids": sorted(dataset.held_out_relation_ids)
+        if getattr(dataset, "held_out_relation_ids", None)
+        else [],
     }
 
     if args.method == "baseline_sage":
@@ -556,7 +828,11 @@ def main() -> None:
             args.neighbor_aggr,
         )
         cfg = TrainConfig(
-            epochs=args.epochs, seed=args.seed, neighbor_aggr=args.neighbor_aggr
+            in_dim=args.in_dim,
+            out_dim=args.in_dim,
+            epochs=args.epochs,
+            seed=args.seed,
+            neighbor_aggr=args.neighbor_aggr,
         )
         model = BaselineGraphSAGE(
             cfg.in_dim,
@@ -598,6 +874,7 @@ def main() -> None:
             decoder=args.decoder,
             decoder_model=decoder_model,
             query_buckets=val_query_buckets,
+            return_scores=return_scores,
         )
         _LOG.info("phase=eval_test (baseline_sage)")
         test_metrics = evaluate_inductive_link_prediction(
@@ -612,6 +889,7 @@ def main() -> None:
             decoder=args.decoder,
             decoder_model=decoder_model,
             query_buckets=test_query_buckets,
+            return_scores=return_scores,
         )
         output["train_embedding_shape"] = list(z.shape)
         output["last_epoch"] = last_epoch
@@ -619,12 +897,21 @@ def main() -> None:
         if decoder_history is not None:
             output["decoder_last_epoch"] = decoder_last_epoch
             output["decoder_history"] = history_dict(decoder_history)
-        output["val_metrics"] = val_metrics
-        output["test_metrics"] = test_metrics
-        output["metrics"] = test_metrics
+        _finalize_eval_and_ood(
+            output,
+            val_metrics=val_metrics,
+            test_metrics=test_metrics,
+            args=args,
+            dataset=dataset,
+            train_pos=train_pos,
+            val_pos=val_pos,
+            val_neg=val_neg,
+            test_pos=test_pos,
+            test_neg=test_neg,
+        )
 
     elif args.method == "baseline_gcn":
-        cfg = TrainConfig(epochs=args.epochs, seed=args.seed)
+        cfg = TrainConfig(in_dim=args.in_dim, out_dim=args.in_dim, epochs=args.epochs, seed=args.seed)
         model = BaselineGCN(
             cfg.in_dim,
             cfg.hidden_dim,
@@ -661,6 +948,7 @@ def main() -> None:
             decoder=args.decoder,
             decoder_model=decoder_model,
             query_buckets=val_query_buckets,
+            return_scores=return_scores,
         )
         test_metrics = evaluate_inductive_link_prediction(
             model,
@@ -674,6 +962,7 @@ def main() -> None:
             decoder=args.decoder,
             decoder_model=decoder_model,
             query_buckets=test_query_buckets,
+            return_scores=return_scores,
         )
         output["train_embedding_shape"] = list(z.shape)
         output["last_epoch"] = last_epoch
@@ -681,9 +970,18 @@ def main() -> None:
         if decoder_history is not None:
             output["decoder_last_epoch"] = decoder_last_epoch
             output["decoder_history"] = history_dict(decoder_history)
-        output["val_metrics"] = val_metrics
-        output["test_metrics"] = test_metrics
-        output["metrics"] = test_metrics
+        _finalize_eval_and_ood(
+            output,
+            val_metrics=val_metrics,
+            test_metrics=test_metrics,
+            args=args,
+            dataset=dataset,
+            train_pos=train_pos,
+            val_pos=val_pos,
+            val_neg=val_neg,
+            test_pos=test_pos,
+            test_neg=test_neg,
+        )
 
     elif args.method == "edge_aware_sage":
         _LOG.info(
@@ -695,6 +993,8 @@ def main() -> None:
             _resolved_embedding_model(args),
         )
         cfg = TrainConfig(
+            in_dim=args.in_dim,
+            out_dim=args.in_dim,
             epochs=args.epochs,
             seed=args.seed,
             edge_relation_mode=args.edge_relation_mode,
@@ -758,6 +1058,7 @@ def main() -> None:
             decoder=args.decoder,
             decoder_model=decoder_model,
             query_buckets=val_query_buckets,
+            return_scores=return_scores,
         )
         _LOG.info("phase=eval_test (edge_aware_sage)")
         test_metrics = evaluate_inductive_link_prediction(
@@ -772,6 +1073,7 @@ def main() -> None:
             decoder=args.decoder,
             decoder_model=decoder_model,
             query_buckets=test_query_buckets,
+            return_scores=return_scores,
         )
         output["train_embedding_shape"] = list(z.shape)
         output["relation_init"] = relation_init
@@ -780,9 +1082,18 @@ def main() -> None:
         if decoder_history is not None:
             output["decoder_last_epoch"] = decoder_last_epoch
             output["decoder_history"] = history_dict(decoder_history)
-        output["val_metrics"] = val_metrics
-        output["test_metrics"] = test_metrics
-        output["metrics"] = test_metrics
+        _finalize_eval_and_ood(
+            output,
+            val_metrics=val_metrics,
+            test_metrics=test_metrics,
+            args=args,
+            dataset=dataset,
+            train_pos=train_pos,
+            val_pos=val_pos,
+            val_neg=val_neg,
+            test_pos=test_pos,
+            test_neg=test_neg,
+        )
 
     elif args.method == "node2vec":
         cfg = Node2VecConfig(epochs=args.epochs, seed=args.seed, embedding_dim=64)
@@ -805,10 +1116,19 @@ def main() -> None:
             output["test_metrics"] = link_prediction_dot_product(z, test_pos, test_neg)
             output["metrics"] = output["test_metrics"]
             output["comparable_under_node_split"] = True
+        if args.compute_ood_difficulty:
+            _LOG.warning(
+                "OOD difficulty is not available for node2vec (no per-edge score export); "
+                "use baseline_sage, edge_aware_sage, link_mlp, or edge_aware_link_mlp."
+            )
 
     elif args.method == "link_mlp":
         base_cfg = TrainConfig(
-            epochs=args.epochs, seed=args.seed, neighbor_aggr=args.neighbor_aggr
+            in_dim=args.in_dim,
+            out_dim=args.in_dim,
+            epochs=args.epochs,
+            seed=args.seed,
+            neighbor_aggr=args.neighbor_aggr,
         )
         base_model = BaselineGraphSAGE(
             base_cfg.in_dim,
@@ -845,7 +1165,7 @@ def main() -> None:
         output["history"] = history_dict(history)
         output["base_embedding_history"] = history_dict(base_history)
         output["base_last_epoch"] = base_last_epoch
-        output["val_metrics"] = evaluate_inductive_link_prediction(
+        val_metrics = evaluate_inductive_link_prediction(
             base_model,
             dataset.full_data,
             pos_edge_index=val_pos,
@@ -857,8 +1177,9 @@ def main() -> None:
             decoder="mlp",
             decoder_model=mlp,
             query_buckets=val_query_buckets,
+            return_scores=return_scores,
         )
-        output["test_metrics"] = evaluate_inductive_link_prediction(
+        test_metrics = evaluate_inductive_link_prediction(
             base_model,
             dataset.full_data,
             pos_edge_index=test_pos,
@@ -870,11 +1191,25 @@ def main() -> None:
             decoder="mlp",
             decoder_model=mlp,
             query_buckets=test_query_buckets,
+            return_scores=return_scores,
         )
-        output["metrics"] = output["test_metrics"]
+        _finalize_eval_and_ood(
+            output,
+            val_metrics=val_metrics,
+            test_metrics=test_metrics,
+            args=args,
+            dataset=dataset,
+            train_pos=train_pos,
+            val_pos=val_pos,
+            val_neg=val_neg,
+            test_pos=test_pos,
+            test_neg=test_neg,
+        )
 
     else:
         base_cfg = TrainConfig(
+            in_dim=args.in_dim,
+            out_dim=args.in_dim,
             epochs=args.epochs,
             seed=args.seed,
             edge_relation_mode=args.edge_relation_mode,
@@ -933,7 +1268,7 @@ def main() -> None:
         output["history"] = history_dict(history)
         output["base_embedding_history"] = history_dict(base_history)
         output["base_last_epoch"] = base_last_epoch
-        output["val_metrics"] = evaluate_inductive_link_prediction(
+        val_metrics = evaluate_inductive_link_prediction(
             base_model,
             dataset.full_data,
             pos_edge_index=val_pos,
@@ -945,8 +1280,9 @@ def main() -> None:
             decoder="mlp",
             decoder_model=mlp,
             query_buckets=val_query_buckets,
+            return_scores=return_scores,
         )
-        output["test_metrics"] = evaluate_inductive_link_prediction(
+        test_metrics = evaluate_inductive_link_prediction(
             base_model,
             dataset.full_data,
             pos_edge_index=test_pos,
@@ -958,8 +1294,20 @@ def main() -> None:
             decoder="mlp",
             decoder_model=mlp,
             query_buckets=test_query_buckets,
+            return_scores=return_scores,
         )
-        output["metrics"] = output["test_metrics"]
+        _finalize_eval_and_ood(
+            output,
+            val_metrics=val_metrics,
+            test_metrics=test_metrics,
+            args=args,
+            dataset=dataset,
+            train_pos=train_pos,
+            val_pos=val_pos,
+            val_neg=val_neg,
+            test_pos=test_pos,
+            test_neg=test_neg,
+        )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     _LOG.info("phase=write_json path=%s", args.output.resolve())

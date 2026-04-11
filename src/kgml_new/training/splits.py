@@ -6,6 +6,36 @@ import torch
 from torch_geometric.data import Data
 
 
+def _normalize_held_out_ids(held_out_relation_ids: set[int] | frozenset[int]) -> set[int]:
+    return {int(x) for x in held_out_relation_ids}
+
+
+def split_edge_indices_val_test_only(
+    num_edges: int,
+    *,
+    val_ratio: float,
+    test_ratio: float,
+    seed: int = 42,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Partition every edge index in ``0..num_edges-1`` into validation and test sets
+    (no training split). Uses the same val/test mass as :func:`split_edge_indices`,
+    then assigns the would-be train indices to validation so nothing is left out.
+    """
+    if num_edges <= 0:
+        return torch.empty(0, dtype=torch.long), torch.empty(0, dtype=torch.long)
+    train_idx, val_idx, test_idx = split_edge_indices(
+        num_edges,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=seed,
+    )
+    if train_idx.numel() == 0:
+        return val_idx, test_idx
+    val_idx = torch.cat([val_idx, train_idx], dim=0)
+    return val_idx, test_idx
+
+
 @dataclass
 class EdgeSplit:
     train_pos_edge_index: torch.Tensor
@@ -422,6 +452,277 @@ def create_node_split(
     train_pos = pos[:, train_edge_mask]
     val_pos = _orient_query_edges(pos[:, val_edge_mask], primary_node_mask=val_node_mask)
     test_pos = _orient_query_edges(pos[:, test_edge_mask], primary_node_mask=test_node_mask)
+
+    val_neg = sample_query_negative_edges(
+        val_pos,
+        positive_edge_index=pos,
+        num_src_nodes=num_src_nodes,
+        num_dst_nodes=num_dst_nodes,
+        node_types=node_types,
+        negatives_per_pos=negatives_per_pos,
+        mode=negative_sampling_mode,
+        seed=seed + 1,
+        undirected=undirected,
+        bipartite=False,
+    )
+    test_neg = sample_query_negative_edges(
+        test_pos,
+        positive_edge_index=pos,
+        num_src_nodes=num_src_nodes,
+        num_dst_nodes=num_dst_nodes,
+        node_types=node_types,
+        negatives_per_pos=negatives_per_pos,
+        mode=negative_sampling_mode,
+        seed=seed + 2,
+        undirected=undirected,
+        bipartite=False,
+    )
+
+    return NodeSplit(
+        train_node_mask=train_node_mask,
+        val_node_mask=val_node_mask,
+        test_node_mask=test_node_mask,
+        train_pos_edge_index=train_pos,
+        val_pos_edge_index=val_pos,
+        test_pos_edge_index=test_pos,
+        val_neg_edge_index=val_neg,
+        test_neg_edge_index=test_neg,
+        negatives_per_pos=negatives_per_pos,
+    )
+
+
+def create_edge_split_relation_holdout(
+    edge_index: torch.Tensor,
+    edge_attr: torch.Tensor,
+    *,
+    held_out_relation_ids: set[int] | frozenset[int],
+    num_src_nodes: int,
+    num_dst_nodes: int | None = None,
+    val_ratio: float = 0.15,
+    test_ratio: float = 0.15,
+    seed: int = 42,
+    undirected: bool = True,
+    node_types: list[str] | None = None,
+    negative_sampling_mode: str = "global",
+    negatives_per_pos: int = 20,
+    bipartite: bool | None = None,
+) -> EdgeSplit:
+    """
+    Edge-disjoint split where edges whose relation id is in ``held_out_relation_ids``
+    never appear as training positives; those edges are split only into val/test.
+    """
+    if num_dst_nodes is None:
+        num_dst_nodes = num_src_nodes
+    held = _normalize_held_out_ids(held_out_relation_ids)
+    if not held:
+        raise ValueError("held_out_relation_ids must be non-empty")
+
+    canonical_edge_index = (
+        _canonicalize_undirected_edges(edge_index) if undirected else edge_index.cpu().long()
+    )
+    if canonical_edge_index.size(1) != edge_attr.size(0):
+        raise ValueError(
+            "edge_attr length must match number of edges in canonical_edge_index "
+            f"({canonical_edge_index.size(1)} vs {edge_attr.size(0)})"
+        )
+
+    ea = edge_attr.long().view(-1)
+    held_tensor = torch.tensor(sorted(held), dtype=torch.long)
+    is_held = torch.isin(ea, held_tensor)
+    is_seen = ~is_held
+    num_seen = int(is_seen.sum().item())
+    num_held = int(is_held.sum().item())
+    if num_seen == 0:
+        raise ValueError(
+            "No edges left after excluding held-out relations; check relation ids / graph."
+        )
+    if num_held == 0:
+        raise ValueError("No held-out relation edges present in the graph.")
+
+    seen_ei = canonical_edge_index[:, is_seen]
+    unseen_ei = canonical_edge_index[:, is_held]
+
+    es = create_edge_split(
+        seen_ei,
+        num_src_nodes=num_src_nodes,
+        num_dst_nodes=num_dst_nodes,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=seed,
+        undirected=False,
+        node_types=node_types,
+        negative_sampling_mode=negative_sampling_mode,
+        negatives_per_pos=negatives_per_pos,
+        bipartite=bipartite,
+    )
+
+    val_u_idx, test_u_idx = split_edge_indices_val_test_only(
+        unseen_ei.size(1),
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=seed + 10_000,
+    )
+    val_unseen = unseen_ei[:, val_u_idx]
+    test_unseen = unseen_ei[:, test_u_idx]
+
+    val_pos = torch.cat([es.val_pos_edge_index, val_unseen], dim=1)
+    test_pos = torch.cat([es.test_pos_edge_index, test_unseen], dim=1)
+
+    val_neg = sample_query_negative_edges(
+        val_pos,
+        positive_edge_index=canonical_edge_index,
+        num_src_nodes=num_src_nodes,
+        num_dst_nodes=num_dst_nodes,
+        node_types=node_types,
+        negatives_per_pos=negatives_per_pos,
+        mode=negative_sampling_mode,
+        seed=seed + 1,
+        undirected=undirected,
+        bipartite=bipartite,
+    )
+    test_neg = sample_query_negative_edges(
+        test_pos,
+        positive_edge_index=canonical_edge_index,
+        num_src_nodes=num_src_nodes,
+        num_dst_nodes=num_dst_nodes,
+        node_types=node_types,
+        negatives_per_pos=negatives_per_pos,
+        mode=negative_sampling_mode,
+        seed=seed + 2,
+        undirected=undirected,
+        bipartite=bipartite,
+    )
+
+    return EdgeSplit(
+        train_pos_edge_index=es.train_pos_edge_index,
+        val_pos_edge_index=val_pos,
+        test_pos_edge_index=test_pos,
+        val_neg_edge_index=val_neg,
+        test_neg_edge_index=test_neg,
+        negatives_per_pos=negatives_per_pos,
+    )
+
+
+def create_node_split_relation_holdout(
+    edge_index: torch.Tensor,
+    edge_attr: torch.Tensor,
+    *,
+    held_out_relation_ids: set[int] | frozenset[int],
+    num_src_nodes: int,
+    num_dst_nodes: int | None = None,
+    val_ratio: float = 0.15,
+    test_ratio: float = 0.15,
+    seed: int = 42,
+    undirected: bool = True,
+    node_types: list[str] | None = None,
+    negative_sampling_mode: str = "type_matched",
+    negatives_per_pos: int = 20,
+) -> NodeSplit:
+    """
+    Node-disjoint split extended so held-out relation edges never appear in
+    ``train_pos_edge_index``. Unseen edges that would fall in the train region
+    (both endpoints train-only) are reassigned to val/test via
+    :func:`split_edge_indices_val_test_only`.
+    """
+    if num_dst_nodes is None:
+        num_dst_nodes = num_src_nodes
+    if num_src_nodes != num_dst_nodes:
+        raise ValueError("node split currently expects a homogeneous graph")
+    held = _normalize_held_out_ids(held_out_relation_ids)
+    if not held:
+        raise ValueError("held_out_relation_ids must be non-empty")
+
+    train_idx, val_idx, test_idx = split_node_indices(
+        num_src_nodes,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=seed,
+    )
+
+    train_node_mask = torch.zeros(num_src_nodes, dtype=torch.bool)
+    val_node_mask = torch.zeros(num_src_nodes, dtype=torch.bool)
+    test_node_mask = torch.zeros(num_src_nodes, dtype=torch.bool)
+    train_node_mask[train_idx] = True
+    val_node_mask[val_idx] = True
+    test_node_mask[test_idx] = True
+
+    pos = _canonicalize_undirected_edges(edge_index) if undirected else edge_index.cpu().long()
+    if pos.size(1) != edge_attr.size(0):
+        raise ValueError(
+            "edge_attr length must match number of canonical edges "
+            f"({pos.size(1)} vs {edge_attr.size(0)})"
+        )
+
+    ea = edge_attr.long().view(-1)
+    held_tensor = torch.tensor(sorted(held), dtype=torch.long)
+    is_held = torch.isin(ea, held_tensor)
+
+    src, dst = pos[0], pos[1]
+    test_edge_mask = test_node_mask[src] | test_node_mask[dst]
+    val_edge_mask = ~test_edge_mask & (val_node_mask[src] | val_node_mask[dst])
+    train_edge_mask = ~(test_edge_mask | val_edge_mask)
+
+    train_cols: list[int] = []
+    val_seen_cols: list[int] = []
+    test_seen_cols: list[int] = []
+    val_unseen_cols: list[int] = []
+    test_unseen_cols: list[int] = []
+    train_train_unseen_cols: list[int] = []
+
+    for i in range(pos.size(1)):
+        if not bool(is_held[i].item()):
+            if bool(train_edge_mask[i].item()):
+                train_cols.append(i)
+            elif bool(val_edge_mask[i].item()):
+                val_seen_cols.append(i)
+            elif bool(test_edge_mask[i].item()):
+                test_seen_cols.append(i)
+            else:
+                raise RuntimeError("edge region mask inconsistency for seen edge")
+        else:
+            if bool(test_edge_mask[i].item()):
+                test_unseen_cols.append(i)
+            elif bool(val_edge_mask[i].item()):
+                val_unseen_cols.append(i)
+            elif bool(train_edge_mask[i].item()):
+                train_train_unseen_cols.append(i)
+            else:
+                raise RuntimeError("edge region mask inconsistency for held-out edge")
+
+    if not train_cols:
+        raise ValueError(
+            "No seen-relation training edges after relation holdout; "
+            "relax held-out set or split ratios."
+        )
+
+    tt_u = torch.tensor(train_train_unseen_cols, dtype=torch.long)
+    if tt_u.numel() > 0:
+        val_tt_idx, test_tt_idx = split_edge_indices_val_test_only(
+            tt_u.numel(),
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed + 20_000,
+        )
+        val_unseen_cols.extend(tt_u[val_tt_idx].tolist())
+        test_unseen_cols.extend(tt_u[test_tt_idx].tolist())
+
+    def _take(cols: list[int]) -> torch.Tensor:
+        if not cols:
+            return torch.empty((2, 0), dtype=torch.long)
+        idx = torch.tensor(cols, dtype=torch.long)
+        return pos[:, idx]
+
+    train_pos = _take(train_cols)
+    val_seen = _take(val_seen_cols)
+    test_seen = _take(test_seen_cols)
+    val_unseen = _take(val_unseen_cols)
+    test_unseen = _take(test_unseen_cols)
+
+    val_pos = torch.cat([val_seen, val_unseen], dim=1) if val_unseen.numel() else val_seen
+    test_pos = torch.cat([test_seen, test_unseen], dim=1) if test_unseen.numel() else test_seen
+
+    val_pos = _orient_query_edges(val_pos, primary_node_mask=val_node_mask)
+    test_pos = _orient_query_edges(test_pos, primary_node_mask=test_node_mask)
 
     val_neg = sample_query_negative_edges(
         val_pos,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from typing import Any
 
 import numpy as np
 import torch
@@ -66,6 +67,75 @@ def grouped_link_prediction_metrics(
     flat_metrics["hits@3"] = _hits_at_k(pos_scores_np, neg_scores_np, 3)
     flat_metrics["hits@10"] = _hits_at_k(pos_scores_np, neg_scores_np, 10)
     return flat_metrics
+
+
+def _empty_subgroup_metrics() -> dict[str, float]:
+    return {
+        "roc_auc": float("nan"),
+        "average_precision": float("nan"),
+        "hits@1": float("nan"),
+        "hits@3": float("nan"),
+        "hits@10": float("nan"),
+    }
+
+
+def _build_uv_to_relation_id(
+    positive_edge_index: torch.Tensor,
+    positive_edge_attr: torch.Tensor,
+) -> dict[tuple[int, int], int]:
+    """Map canonical undirected (u,v) -> relation id."""
+    ei = positive_edge_index.cpu().long()
+    ea = positive_edge_attr.cpu().long().view(-1)
+    out: dict[tuple[int, int], int] = {}
+    for i in range(ei.size(1)):
+        u, v = int(ei[0, i]), int(ei[1, i])
+        a, b = (u, v) if u <= v else (v, u)
+        rid = int(ea[i].item())
+        out[(a, b)] = rid
+    return out
+
+
+def compute_relation_holdout_metrics(
+    *,
+    query_pos_edge_index: torch.Tensor,
+    positive_edge_index: torch.Tensor,
+    positive_edge_attr: torch.Tensor,
+    held_out_relation_ids: frozenset[int],
+    pos_scores: np.ndarray,
+    neg_scores: np.ndarray,
+) -> dict[str, Any]:
+    """
+    Split link-prediction scores by whether the query positive's relation type was held out
+    from training (zero-shot relations).
+    """
+    if not held_out_relation_ids:
+        return {}
+    pos_scores = np.asarray(pos_scores, dtype=np.float32).reshape(-1)
+    neg_scores = np.asarray(neg_scores, dtype=np.float32)
+    uv_rel = _build_uv_to_relation_id(positive_edge_index, positive_edge_attr)
+    qp = query_pos_edge_index.cpu().long()
+    nq = qp.size(1)
+    is_unseen = np.zeros(nq, dtype=bool)
+    for i in range(nq):
+        u, v = int(qp[0, i]), int(qp[1, i])
+        a, b = (u, v) if u <= v else (v, u)
+        rid = int(uv_rel.get((a, b), 0))
+        is_unseen[i] = rid in held_out_relation_ids
+
+    seen_idx = np.where(~is_unseen)[0]
+    unseen_idx = np.where(is_unseen)[0]
+
+    def _sub(idx: np.ndarray) -> dict[str, float]:
+        if idx.size == 0:
+            return _empty_subgroup_metrics()
+        return grouped_link_prediction_metrics(pos_scores[idx], neg_scores[idx])
+
+    return {
+        "seen_relations": _sub(seen_idx),
+        "unseen_relations": _sub(unseen_idx),
+        "n_seen_queries": int(seen_idx.size),
+        "n_unseen_queries": int(unseen_idx.size),
+    }
 
 
 def link_prediction_dot_product(
@@ -203,6 +273,7 @@ def _evaluate_inductive_link_prediction_fullgraph(
     decoder_model: nn.Module | None = None,
     batch_size: int = 64,
     query_buckets: list[str] | None = None,
+    return_scores: bool = False,
 ) -> dict[str, float] | dict[str, object]:
     """
     Same metrics as sampled eval, but one full-graph forward per batch with
@@ -223,7 +294,7 @@ def _evaluate_inductive_link_prediction_fullgraph(
     neg_edge_index = neg_edge_index.cpu().long()
 
     if pos_edge_index.numel() == 0:
-        empty = {
+        empty: dict[str, float | list | np.ndarray | object] = {
             "roc_auc": float("nan"),
             "average_precision": float("nan"),
             "hits@1": float("nan"),
@@ -235,6 +306,9 @@ def _evaluate_inductive_link_prediction_fullgraph(
                 query_buckets=query_buckets,
             ),
         }
+        if return_scores:
+            empty["pos_scores"] = np.empty((0,), dtype=np.float32)
+            empty["neg_scores"] = np.empty((0, negatives_per_pos), dtype=np.float32)
         return empty
 
     pos_scores_parts: list[torch.Tensor] = []
@@ -281,12 +355,17 @@ def _evaluate_inductive_link_prediction_fullgraph(
 
     pos_scores = torch.cat(pos_scores_parts, dim=0).numpy()
     neg_scores = torch.cat(neg_scores_parts, dim=0).numpy()
-    metrics = grouped_link_prediction_metrics(pos_scores, neg_scores)
+    metrics: dict[str, float | list | np.ndarray | object] = grouped_link_prediction_metrics(
+        pos_scores, neg_scores
+    )
     metrics["bucket_metrics"] = _bucket_metrics(
         pos_scores=pos_scores,
         neg_scores=neg_scores,
         query_buckets=query_buckets,
     )
+    if return_scores:
+        metrics["pos_scores"] = pos_scores
+        metrics["neg_scores"] = neg_scores
     return metrics
 
 
@@ -304,6 +383,7 @@ def evaluate_inductive_link_prediction(
     decoder_model: nn.Module | None = None,
     batch_size: int = 64,
     query_buckets: list[str] | None = None,
+    return_scores: bool = False,
 ) -> dict[str, float] | dict[str, object]:
     from torch_geometric.loader import LinkNeighborLoader
     from torch_geometric.typing import WITH_PYG_LIB, WITH_TORCH_SPARSE
@@ -325,6 +405,7 @@ def evaluate_inductive_link_prediction(
             decoder_model=decoder_model,
             batch_size=batch_size,
             query_buckets=query_buckets,
+            return_scores=return_scores,
         )
 
     model = model.to(device)
@@ -337,7 +418,7 @@ def evaluate_inductive_link_prediction(
     neg_edge_index = neg_edge_index.cpu().long()
 
     if pos_edge_index.numel() == 0:
-        empty = {
+        empty: dict[str, float | list | np.ndarray | object] = {
             "roc_auc": float("nan"),
             "average_precision": float("nan"),
             "hits@1": float("nan"),
@@ -349,6 +430,9 @@ def evaluate_inductive_link_prediction(
                 query_buckets=query_buckets,
             ),
         }
+        if return_scores:
+            empty["pos_scores"] = np.empty((0,), dtype=np.float32)
+            empty["neg_scores"] = np.empty((0, negatives_per_pos), dtype=np.float32)
         return empty
 
     pos_scores_parts: list[torch.Tensor] = []
@@ -397,12 +481,17 @@ def evaluate_inductive_link_prediction(
 
     pos_scores = torch.cat(pos_scores_parts, dim=0).numpy()
     neg_scores = torch.cat(neg_scores_parts, dim=0).numpy()
-    metrics = grouped_link_prediction_metrics(pos_scores, neg_scores)
+    metrics: dict[str, float | list | np.ndarray | object] = grouped_link_prediction_metrics(
+        pos_scores, neg_scores
+    )
     metrics["bucket_metrics"] = _bucket_metrics(
         pos_scores=pos_scores,
         neg_scores=neg_scores,
         query_buckets=query_buckets,
     )
+    if return_scores:
+        metrics["pos_scores"] = pos_scores
+        metrics["neg_scores"] = neg_scores
     return metrics
 
 

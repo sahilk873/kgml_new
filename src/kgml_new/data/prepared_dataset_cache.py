@@ -55,7 +55,7 @@ def build_cache_meta(
 ) -> dict[str, Any]:
     """Metadata stored next to the pickled dataset for safe reload validation."""
     g = dataset.graph
-    return {
+    meta = {
         "format_version": PREPARED_LINK_PREDICTION_CACHE_VERSION,
         "input": input_fingerprint(input_path),
         "resolved_input_format": resolved_input_format,
@@ -76,6 +76,10 @@ def build_cache_meta(
         "add_self_loops": bool(add_self_loops),
         "split_class": type(dataset.split).__name__,
     }
+    if getattr(dataset, "held_out_relation_ids", None):
+        meta["held_out_relations"] = sorted(dataset.held_out_relations or [])
+        meta["held_out_relation_ids"] = sorted(dataset.held_out_relation_ids)
+    return meta
 
 
 def save_prepared_link_prediction_dataset(

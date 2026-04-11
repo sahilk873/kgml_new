@@ -76,6 +76,8 @@ sbatch scripts/slurm/drkg_full_experiments_array.slurm
 
 Runs baseline GraphSAGE (mean + max pool) and edge-aware FiLM (mean + max) with `--log-file logs/slurm/run-drkg-${JOB}_${TASK}.log` and `--require-cuda`. Set `REL_CACHE` (default `cache/drkg-relations-sapbert.pt`) before `sbatch` if needed.
 
+For **node split**, **OOD difficulty metrics**, optional **relation holdout**, and **SapBERT vs random** FiLM controls, use `scripts/slurm/drkg_ood_interpretability_array.slurm` (or `./scripts/slurm/submit_drkg_ood_interpretability.sh`). Details: `scripts/slurm/README.md` (section “OOD interpretability bundle”).
+
 If Slurm exits immediately with `torch.cuda.is_available() is False` while `nvidia-smi` works, your pip PyTorch build is likely **too new for the node driver** (e.g. `+cu130` on a CUDA 12.8 driver). Reinstall once from the venv:
 
 ```bash
@@ -159,6 +161,49 @@ Legacy edge-disjoint split.
 
 Use this only for legacy comparisons or sanity checks.
 
+### Unseen relation types (relation holdout)
+
+Pass one or more relation names with `--held-out-relations` so those relation types **never appear as training positives**. They are split only into validation and test queries. Seen relation types use the usual node or edge split on the remaining edges. This tests whether the model generalizes to **zero-shot relation types** (especially when comparing semantic relation embeddings to random or shuffled controls).
+
+**Choosing relations:** Pick held-out types with enough val/test edges to stabilize metrics; keep training relations non-trivial. Semantically related seen vs held-out pairs (e.g. agonist / activator / binds vs antagonist / inhibitor / blocker) make a stronger story. To inspect counts, load the graph and tally edge relations (e.g. `collections.Counter` over the relation column).
+
+**Controls (paper table columns):**
+
+| Column | Typical CLI |
+|--------|----------------|
+| Random | `--no-semantic` or `--embedding-model random` |
+| Shuffled | `--shuffle-relations` plus a semantic cache (relation labels permuted; embeddings still “semantic”) |
+| Semantic | `--semantic` with `--semantic-cache` and/or OpenAI/SapBERT as usual |
+
+**Commands:**
+
+```bash
+# Edge split, hold out two relation names (repeat flag or space-separated list)
+.venv/bin/python -m kgml_new.scripts.run_gpu_method \
+  --method edge_aware_sage \
+  --input kg.csv \
+  --split-protocol edge \
+  --held-out-relations antagonist inhibitor \
+  --semantic --semantic-cache cache/primekg-relations.pt \
+  --epochs 200 \
+  --output results/edge_aware_holdout.json
+```
+
+```bash
+# Node split (default) with the same holdout list
+.venv/bin/python -m kgml_new.scripts.run_gpu_method \
+  --method edge_aware_sage \
+  --input kg.csv \
+  --split-protocol node \
+  --held-out-relations antagonist inhibitor \
+  --semantic --semantic-cache cache/primekg-relations.pt \
+  --output results/edge_aware_holdout_node.json
+```
+
+**Prepared cache:** `export_prepared_link_prediction.py` accepts the same `--held-out-relations`; cache metadata records them for `run_gpu_method --prepared-dataset-cache`.
+
+**Reading results:** The JSON field `relation_holdout` contains `val` and `test`, each with `seen_relations` and `unseen_relations` metric dicts (ROC-AUC, AP, hits@k) plus `n_seen_queries` / `n_unseen_queries`. Top-level `held_out_relations` / `held_out_relation_ids` echo the resolved holdout set. If semantic embeddings help **unseen** relations more than **seen**, that supports using relation **meaning** beyond memorized relation IDs.
+
 ## Generic Link Prediction Runner
 
 Entry point:
@@ -175,6 +220,24 @@ Methods:
 - `node2vec`
 - `link_mlp`
 - `edge_aware_link_mlp`
+
+### OOD difficulty analysis (optional)
+
+Add post-hoc stratified metrics (node frequency, novelty, distance to train support, relation frequency, support, combined difficulty) to the run JSON, and optionally export per-edge rows for plotting. Not available for `node2vec` in the current runner.
+
+Minimal example:
+
+```bash
+.venv/bin/python -m kgml_new.scripts.run_gpu_method \
+  --method baseline_sage \
+  --input kg.csv \
+  --split-protocol node \
+  --output results/run.json \
+  --compute-ood-difficulty \
+  --save-edge-predictions
+```
+
+Full flag list, graph policy, aggregation across seeds, and `pytest` coverage are documented in [AGENTS.md](AGENTS.md) under **`run_gpu_method` → OOD difficulty analysis**.
 
 ### Common commands
 
@@ -321,6 +384,7 @@ Link MLP scorer:
 - `--negatives-per-pos`: number of negatives per positive in validation/test
 - `--decoder {dot,mlp}`: link scoring head
 - `--shuffle-relations`: relation-label ablation
+- `--held-out-relations REL [REL ...]`: exclude relation types from training positives (zero-shot relations at val/test); see [Unseen relation types](#unseen-relation-types-relation-holdout)
 - `--semantic` / `--no-semantic`: for edge-aware methods, semantic is on by default; `--no-semantic` uses random relation embeddings unless you set `--embedding-model` explicitly
 - `--embedding-model {openai,sapbert,random}`: relation embedding backend (defaults: `openai` when `--semantic`, `random` when `--no-semantic`; you can override, e.g. SapBERT while keeping `--semantic`)
 - `--semantic-cache`: optional `.pt` cache for relation embeddings (must match model slice / relation vocabulary when possible)
@@ -597,6 +661,8 @@ Edge-aware runs also record:
 - `num_relation_bases`
 - `semantic`
 - `semantic_cache`
+
+With `--held-out-relations`, runs also include `held_out_relations`, `held_out_relation_ids`, and `relation_holdout` (per-split `seen_relations` vs `unseen_relations` metrics).
 
 For node-disjoint link prediction, `metrics` is the test-set metrics.
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import networkx as nx
@@ -14,8 +15,12 @@ from kgml_new.training.splits import (
     NodeSplit,
     build_train_graph_data,
     create_edge_split,
+    create_edge_split_relation_holdout,
     create_node_split,
+    create_node_split_relation_holdout,
 )
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass
@@ -36,6 +41,8 @@ class LinkPredictionDataset:
     positive_edge_index: torch.Tensor
     positive_edge_attr: torch.Tensor | None
     train_pos_edge_attr: torch.Tensor | None
+    held_out_relations: frozenset[str] | None = None
+    held_out_relation_ids: frozenset[int] | None = None
 
 
 def _shuffle_graph_relations(
@@ -207,6 +214,37 @@ def _undirected_positive_edges(data: Data) -> tuple[torch.Tensor, torch.Tensor |
     return pos_edge_index, pos_edge_attr
 
 
+def resolve_held_out_relation_ids(
+    held_out_relations: list[str],
+    relation_lookup: dict[str, int],
+) -> tuple[frozenset[int], list[str], list[str]]:
+    """
+    Map user-provided relation names to ids in ``relation_lookup``.
+
+    Returns ``(ids, resolved_names, unknown_names)``.
+    """
+    ids: set[int] = set()
+    resolved_names: list[str] = []
+    unknown: list[str] = []
+    for raw in held_out_relations:
+        name = str(raw).strip()
+        if not name:
+            continue
+        rid: int | None = None
+        resolved_key: str | None = None
+        for candidate in (name, name.lower(), name.upper()):
+            if candidate in relation_lookup:
+                rid = int(relation_lookup[candidate])
+                resolved_key = candidate
+                break
+        if rid is None:
+            unknown.append(name)
+            continue
+        ids.add(rid)
+        resolved_names.append(resolved_key or name)
+    return frozenset(ids), resolved_names, unknown
+
+
 def _select_train_edge_attr(
     positive_edge_index: torch.Tensor,
     positive_edge_attr: torch.Tensor | None,
@@ -240,6 +278,7 @@ def prepare_link_prediction_dataset(
     decoder: str = "dot",
     shuffle_relations: bool = False,
     add_self_loops: bool = False,
+    held_out_relations: list[str] | None = None,
 ) -> LinkPredictionDataset:
     working_graph = (
         _shuffle_graph_relations(graph, seed=seed)
@@ -262,7 +301,59 @@ def prepare_link_prediction_dataset(
     ]
     if negative_sampling_mode is None:
         negative_sampling_mode = "type_matched" if split_protocol == "node" else "global"
-    if split_protocol == "edge":
+
+    held_ids: frozenset[int] | None = None
+    held_names: frozenset[str] | None = None
+    if held_out_relations:
+        if positive_edge_attr is None:
+            raise ValueError(
+                "held_out_relations requires relation labels on edges (edge_attr); "
+                "check that the graph has a relation attribute."
+            )
+        hid, resolved, unknown = resolve_held_out_relation_ids(
+            held_out_relations, relation_lookup
+        )
+        for u in unknown:
+            _LOG.warning("Unknown held-out relation name (not in vocabulary): %s", u)
+        if not hid:
+            raise ValueError(
+                "held_out_relations did not resolve to any relation id in the graph vocabulary."
+            )
+        held_ids = hid
+        held_names = frozenset(resolved)
+
+    if held_ids is not None:
+        if split_protocol == "edge":
+            split = create_edge_split_relation_holdout(
+                positive_edge_index,
+                positive_edge_attr,
+                held_out_relation_ids=held_ids,
+                num_src_nodes=int(data.num_nodes),
+                val_ratio=val_ratio,
+                test_ratio=test_ratio,
+                seed=seed,
+                undirected=True,
+                node_types=node_types,
+                negative_sampling_mode=negative_sampling_mode,
+                negatives_per_pos=negatives_per_pos,
+            )
+        elif split_protocol == "node":
+            split = create_node_split_relation_holdout(
+                positive_edge_index,
+                positive_edge_attr,
+                held_out_relation_ids=held_ids,
+                num_src_nodes=int(data.num_nodes),
+                val_ratio=val_ratio,
+                test_ratio=test_ratio,
+                seed=seed,
+                undirected=True,
+                node_types=node_types,
+                negative_sampling_mode=negative_sampling_mode,
+                negatives_per_pos=negatives_per_pos,
+            )
+        else:
+            raise ValueError(f"Unsupported split_protocol: {split_protocol}")
+    elif split_protocol == "edge":
         split = create_edge_split(
             positive_edge_index,
             num_src_nodes=int(data.num_nodes),
@@ -315,6 +406,8 @@ def prepare_link_prediction_dataset(
         positive_edge_index=positive_edge_index,
         positive_edge_attr=positive_edge_attr,
         train_pos_edge_attr=train_pos_edge_attr,
+        held_out_relations=held_names,
+        held_out_relation_ids=held_ids,
     )
 
 

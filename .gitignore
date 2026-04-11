@@ -22,6 +22,9 @@ cache/
 drkg.tar.gz
 *.tar.gz
 
+# Hetionet raw graph (download; see README / AGENTS.md)
+hetionet-v1.0.json.bz2
+
 # Data files (download using scripts/setup_hpc.sh)
 /kg.csv
 /drkg.tsv

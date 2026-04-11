@@ -34,10 +34,13 @@ When in doubt, trust these files first (paths are relative to the repository roo
 - [src/kgml_new/scripts/run_link_prediction.py](src/kgml_new/scripts/run_link_prediction.py)
 - [src/kgml_new/scripts/run_node_classification.py](src/kgml_new/scripts/run_node_classification.py)
 - [src/kgml_new/scripts/generate_relation_embeddings.py](src/kgml_new/scripts/generate_relation_embeddings.py)
+- [src/kgml_new/scripts/convert_hetionet.py](src/kgml_new/scripts/convert_hetionet.py)
 - [src/kgml_new/embeddings/semantic.py](src/kgml_new/embeddings/semantic.py)
 - [src/kgml_new/config.py](src/kgml_new/config.py)
 - [src/kgml_new/data/loaders.py](src/kgml_new/data/loaders.py)
 - [src/kgml_new/data/relations.py](src/kgml_new/data/relations.py)
+- [src/kgml_new/eval/ood_difficulty.py](src/kgml_new/eval/ood_difficulty.py) (OOD difficulty features and bucketed metrics)
+- [src/kgml_new/scripts/aggregate_ood_results.py](src/kgml_new/scripts/aggregate_ood_results.py) (aggregate OOD JSON across runs)
 
 ## Environment And Setup
 
@@ -83,6 +86,7 @@ Important files and directories in this repo:
 - [relation_glossary.tsv](relation_glossary.tsv): glossary used for DRKG-style sourced predicates
 - [cache](cache): relation embedding caches
 - [results](results): experiment outputs if created
+- [results/ood](results/ood): optional OOD difficulty CSV exports and multi-run aggregates (created when using those flags)
 - [scripts/slurm](scripts/slurm): SLURM launch scripts
 - [data/drkg-shuffled-seed42.tsv](data/drkg-shuffled-seed42.tsv): reproducible shuffled DRKG subset helper
 
@@ -141,6 +145,56 @@ Canonical examples:
 3. trains one chosen method
 4. evaluates validation and test performance
 5. writes a JSON artifact with metrics and run metadata
+
+#### OOD difficulty analysis (optional)
+
+Stratify validation/test metrics by post-hoc difficulty (node frequency, novelty vs train, distance to train support on the full graph, relation frequency, structural support, combined score). Implementation: [src/kgml_new/eval/ood_difficulty.py](src/kgml_new/eval/ood_difficulty.py). Only affects runs that use `evaluate_inductive_link_prediction` with score export (not `node2vec`).
+
+From the repo root, with the project venv:
+
+```bash
+source .venv/bin/activate
+cd /path/to/kgml_new   # repository root
+PYTHONPATH=src python -m kgml_new.scripts.run_gpu_method \
+  --method baseline_sage \
+  --input kg.csv \
+  --split-protocol node \
+  --output results/run.json \
+  --compute-ood-difficulty \
+  --save-edge-predictions
+```
+
+**Flags:**
+
+| Flag | Meaning |
+|------|---------|
+| `--compute-ood-difficulty` | Add `ood_difficulty` to the JSON (bucketed ROC-AUC, AP, Hits@K, counts per difficulty type). |
+| `--save-edge-predictions` | Write per-edge rows to `results/ood/<stem>_edge_predictions.csv` (large; use when plotting). |
+| `--ood-run-name` | CSV filename stem (default: `--output` stem). |
+| `--ood-output-dir` | Directory for CSV (default: `results/ood`). |
+| `--ood-eval-splits val test` | Which splits to analyze (default both). |
+| `--ood-buckets quantile` | Quantile buckets (default). `fixed` is not implemented and falls back to quantile with a warning. |
+| `--ood-num-quantile-buckets` | Default `3` (e.g. tertiles for node frequency, combined score). |
+| `--ood-tail-quantile` | Tail mass for `nodefreq_tail` / `nodefreq_head` (default `0.1`). |
+
+**Graph policy** (also recorded under `ood_difficulty.*.meta` in the JSON): degrees, support, and relation stats use **train positive edges only**; distance-to-train-support uses **multi-source BFS** on the undirected graph from `full_data.edge_index`, seeded by nodes incident to train positives.
+
+**Aggregate many JSON outputs** (mean/std per bucket, optional semantic-minus-random gaps paired by `seed`):
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=src python -m kgml_new.scripts.aggregate_ood_results \
+  --inputs results/run-seed41.json results/run-seed42.json \
+  --tag my_comparison \
+  --out-dir results/ood \
+  --group-keys input_path split_protocol method edge_relation_mode embedding_model_resolved \
+  --baseline-embedding random \
+  --target-embedding openai
+```
+
+Writes `results/ood/aggregate_<tag>.json` and `aggregate_<tag>.csv`.
+
+**Tests** covering OOD helpers: `tests/test_ood_difficulty.py` (run with `PYTHONPATH=src python -m pytest tests/test_ood_difficulty.py`).
 
 ### 2. `run_txgnn`
 
@@ -206,6 +260,23 @@ Example (random baseline cache):
   --embedding-model random \
   --edge-dim 32
 ```
+
+### 6. `convert_hetionet`
+
+Hetionet data (`hetionet-v1.0.json.bz2`) is not directly consumable by `run_gpu_method`; convert it first:
+
+- [src/kgml_new/scripts/convert_hetionet.py](src/kgml_new/scripts/convert_hetionet.py)
+
+Example:
+
+```bash
+.venv/bin/python -m kgml_new.scripts.convert_hetionet \
+  --input hetionet-v1.0.json.bz2 \
+  --output-tsv data/hetionet.tsv \
+  --output-pickle data/hetionet.pkl
+```
+
+The TSV output is headerless and follows DRKG ordering (`source relation target`), so `run_gpu_method --input data/hetionet.tsv` works with the existing CSV/TSV loader path. By default, non-`both` direction values are appended to relation labels to avoid collapsing directional semantics in undirected graph training.
 
 ## Input Formats And How Loading Works
 
@@ -711,6 +782,14 @@ For `run_gpu_method`, the most important flags are:
 - `--seed`
 - `--in-dim`
 - `--output`
+- `--compute-ood-difficulty` / `--no-compute-ood-difficulty`
+- `--save-edge-predictions` / `--no-save-edge-predictions`
+- `--ood-buckets`
+- `--ood-num-quantile-buckets`
+- `--ood-tail-quantile`
+- `--ood-eval-splits`
+- `--ood-output-dir`
+- `--ood-run-name`
 
 For `run_txgnn`, the most important flags are:
 
@@ -741,6 +820,7 @@ For `run_txgnn`, the most important flags are:
 - training history
 - validation metrics
 - test metrics
+- optional `ood_difficulty`: stratified bucket metrics and meta per split (`val` / `test`), plus `config` echoing CLI; no per-edge arrays (those go to CSV when `--save-edge-predictions` is set)
 
 Important fields to read first:
 

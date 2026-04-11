@@ -7,6 +7,9 @@
 #
 # Use the same environment variables as drkg_full_experiments_array.slurm for INPUT,
 # SPLIT, SEED, PREPARED_CACHE, etc. (export before sbatch or --export=ALL).
+# Optional HELD_OUT_RELATIONS (space-separated names): passed to export and, if PREPARED_CACHE
+# is unset, default output becomes cache/drkg-prepared_${SPLIT}_s${SEED}_ho_<slug>.pkl
+# (same convention as drkg_ood_interpretability_array.slurm).
 #
 #SBATCH --job-name=drkg-prep-cache
 # On hpc6 the general CPU queue is "batch" (not "cpu"). Override when submitting if needed:
@@ -57,12 +60,27 @@ if [[ -n "${PREPARED_CACHE:-}" ]]; then
     PREPARED_CACHE="${REPO}/${PREPARED_CACHE}"
   fi
 else
-  PREPARED_CACHE="${REPO}/cache/drkg-prepared_${SPLIT}_s${SEED}.pkl"
+  HO_PART=""
+  if [[ -n "${HELD_OUT_RELATIONS:-}" ]]; then
+    HO_SLUG=$(printf '%s' "${HELD_OUT_RELATIONS}" | tr -c 'a-zA-Z0-9_' '_' | tr -s '_' | sed 's/^_\|_$//g')
+    if [[ -n "${HO_SLUG}" ]]; then
+      HO_PART="_ho_${HO_SLUG}"
+    fi
+  fi
+  PREPARED_CACHE="${REPO}/cache/drkg-prepared_${SPLIT}_s${SEED}${HO_PART}.pkl"
 fi
 
 SHUFFLE_EXTRA=()
 if [[ "${SHUFFLE_RELATIONS:-0}" == "1" ]]; then
   SHUFFLE_EXTRA=(--shuffle-relations)
+fi
+
+HOLDOUT_EXPORT=()
+if [[ -n "${HELD_OUT_RELATIONS:-}" ]]; then
+  read -r -a _hor <<< "${HELD_OUT_RELATIONS}"
+  if [[ ${#_hor[@]} -gt 0 ]]; then
+    HOLDOUT_EXPORT=(--held-out-relations "${_hor[@]}")
+  fi
 fi
 
 EXPORT_CMD=(
@@ -84,7 +102,7 @@ fi
 if [[ -n "${NEGATIVE_SAMPLING_MODE:-}" ]]; then
   EXPORT_CMD+=(--negative-sampling-mode "${NEGATIVE_SAMPLING_MODE}")
 fi
-EXPORT_CMD+=("${SHUFFLE_EXTRA[@]}")
+EXPORT_CMD+=("${SHUFFLE_EXTRA[@]}" "${HOLDOUT_EXPORT[@]}")
 
 echo "=== drkg_build_prepared_cache host=$(hostname) ==="
 echo "Input: ${INPUT}"
