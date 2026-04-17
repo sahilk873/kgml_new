@@ -14,7 +14,7 @@ For cache formats, embedding APIs, DRKG caveats, and **checklists for code chang
 Use this sequence for a reproducible link-prediction run:
 
 1. **Environment:** `pip install -e ".[dev]"` and, if using OpenAI relation embeddings, `pip install -e ".[semantic]"` plus `OPENAI_API_KEY` (and optionally `.env` via `python-dotenv`).
-2. **Choose input:** PrimeKG CSV (`kg.csv`), DRKG TSV (`drkg.tsv`), another table (set `--source-col` / `--target-col` / `--relation-col`), or a pickle (`--input-format pickle`). Remember DRKG prefix slices are often single-relation unless you shuffle or sample (see below).
+2. **Choose input:** PrimeKG CSV (`data/kg.csv`), DRKG TSV (`drkg.tsv`), another table (set `--source-col` / `--target-col` / `--relation-col`), or a pickle (`--input-format pickle`). Remember DRKG prefix slices are often single-relation unless you shuffle or sample (see below).
 3. **Optional relation cache (edge-aware / semantic):** Precompute once with `generate_relation_embeddings` (see [Relation embedding cache generator](#relation-embedding-cache-generator)). Match `--max-edges` and relation vocabulary to the graph slice you will train on.
 4. **Run one method:** `python -m kgml_new.scripts.run_gpu_method --method ... --output results/....json` with explicit `--split-protocol`, `--seed`, `--epochs`, and any `--semantic` / `--semantic-cache` / `--embedding-model` settings.
 5. **Record metadata:** Save the exact shell command, dataset path, whether `--max-edges` was a prefix slice, cache path, and JSON output path (the result file already contains many of these fields—verify them).
@@ -137,6 +137,14 @@ Accepted inputs:
 
 TxGNN requires typed nodes. PrimeKG satisfies this directly through `x_type` and `y_type`. DRKG can work when node types are recoverable from prefixes like `Gene::`, `Compound::`, `Disease::`.
 
+### HGT runner (standalone)
+
+Path: `python -m kgml_new.scripts.run_hgt` (or `kgml-new-hgt`)
+
+Same input requirements as the TxGNN runner (typed CSV/TSV or pickled `networkx.Graph`). Uses [Heterogeneous Graph Transformer](https://arxiv.org/abs/2003.01332) layers (`torch_geometric.nn.HGTConv`) plus DistMult scoring—separate implementation from TxGNN. Useful flags: `--num-heads` (default 4), `--num-layers` (default 2), `--dropout`. Channel dimensions are aligned to be divisible by `num_heads`.
+
+Slurm example: `scripts/slurm/run_hgt.slurm`.
+
 ## Main Split Protocols
 
 ### `--split-protocol node`
@@ -152,6 +160,7 @@ This is the default and recommended setting.
 Use this when you want OOD-style evaluation on unseen entities.
 
 ### `--split-protocol edge`
+
 
 Legacy edge-disjoint split.
 
@@ -181,7 +190,7 @@ Pass one or more relation names with `--held-out-relations` so those relation ty
 # Edge split, hold out two relation names (repeat flag or space-separated list)
 .venv/bin/python -m kgml_new.scripts.run_gpu_method \
   --method edge_aware_sage \
-  --input kg.csv \
+  --input data/kg.csv \
   --split-protocol edge \
   --held-out-relations antagonist inhibitor \
   --semantic --semantic-cache cache/primekg-relations.pt \
@@ -193,7 +202,7 @@ Pass one or more relation names with `--held-out-relations` so those relation ty
 # Node split (default) with the same holdout list
 .venv/bin/python -m kgml_new.scripts.run_gpu_method \
   --method edge_aware_sage \
-  --input kg.csv \
+  --input data/kg.csv \
   --split-protocol node \
   --held-out-relations antagonist inhibitor \
   --semantic --semantic-cache cache/primekg-relations.pt \
@@ -230,7 +239,7 @@ Minimal example:
 ```bash
 .venv/bin/python -m kgml_new.scripts.run_gpu_method \
   --method baseline_sage \
-  --input kg.csv \
+  --input data/kg.csv \
   --split-protocol node \
   --output results/run.json \
   --compute-ood-difficulty \
@@ -246,7 +255,7 @@ PrimeKG, node-disjoint baseline GraphSAGE:
 ```bash
 .venv/bin/python -m kgml_new.scripts.run_gpu_method \
   --method baseline_sage \
-  --input kg.csv \
+  --input data/kg.csv \
   --split-protocol node \
   --epochs 200 \
   --output results/baseline_sage-node.json
@@ -257,7 +266,7 @@ PrimeKG, legacy edge split:
 ```bash
 .venv/bin/python -m kgml_new.scripts.run_gpu_method \
   --method baseline_sage \
-  --input kg.csv \
+  --input data/kg.csv \
   --split-protocol edge \
   --epochs 200 \
   --output results/baseline_sage-edge.json
@@ -290,7 +299,7 @@ Edge-aware GraphSAGE:
 ```bash
 .venv/bin/python -m kgml_new.scripts.run_gpu_method \
   --method edge_aware_sage \
-  --input kg.csv \
+  --input data/kg.csv \
   --split-protocol node \
   --semantic \
   --semantic-cache cache/primekg-edge-aware-semantic.pt \
@@ -352,7 +361,7 @@ Node2Vec:
 ```bash
 .venv/bin/python -m kgml_new.scripts.run_gpu_method \
   --method node2vec \
-  --input kg.csv \
+  --input data/kg.csv \
   --split-protocol edge \
   --epochs 20 \
   --output results/node2vec-edge.json
@@ -365,7 +374,7 @@ Link MLP scorer:
 ```bash
 .venv/bin/python -m kgml_new.scripts.run_gpu_method \
   --method link_mlp \
-  --input kg.csv \
+  --input data/kg.csv \
   --split-protocol node \
   --epochs 50 \
   --output results/link_mlp-node.json
@@ -379,19 +388,19 @@ Link MLP scorer:
 - `--max-edges`: useful for smoke tests
 - `--source-col`, `--target-col`, `--relation-col`: map non-PrimeKG schemas
 - `--source-type-col`, `--target-type-col`: typed-node columns when present
-- `--split-protocol {node,edge}`: main evaluation choice
+- `--split-protocol {node,node_category,edge}`: main evaluation choice (`node_category` requires `--held-out-node-categories`)
 - `--negative-sampling-mode {global,type_matched}`: defaults to `type_matched` under node split, `global` under edge split
 - `--negatives-per-pos`: number of negatives per positive in validation/test
 - `--decoder {dot,mlp}`: link scoring head
 - `--shuffle-relations`: relation-label ablation
 - `--held-out-relations REL [REL ...]`: exclude relation types from training positives (zero-shot relations at val/test); see [Unseen relation types](#unseen-relation-types-relation-holdout)
 - `--semantic` / `--no-semantic`: for edge-aware methods, semantic is on by default; `--no-semantic` uses random relation embeddings unless you set `--embedding-model` explicitly
-- `--embedding-model {openai,sapbert,random}`: relation embedding backend (defaults: `openai` when `--semantic`, `random` when `--no-semantic`; you can override, e.g. SapBERT while keeping `--semantic`)
+- `--embedding-model {openai,gemini,sapbert,e5,random}`: relation embedding backend (defaults: `openai` when `--semantic`, `random` when `--no-semantic`; override e.g. `--embedding-model gemini` or `sapbert` while keeping `--semantic`)
 - `--semantic-cache`: optional `.pt` cache for relation embeddings (must match model slice / relation vocabulary when possible)
 - `--glossary-path`: override default `relation_glossary.tsv` for DRKG-style prompts
 - `--sapbert-model`: HuggingFace id when `--embedding-model sapbert`
 - `--strict-semantic`: fail instead of silently falling back if embedding setup fails
-- `--edge-relation-mode {concat,gated,basis_mixture}`: how projected relation embeddings control message passing
+- `--edge-relation-mode {concat,gated,basis_mixture,film}`: how projected relation embeddings control message passing (`film` is used by `edge_aware_sage_film_semdec`; the runner forces `film` for that method)
 - `--num-relation-bases`: number of shared basis transforms for `basis_mixture`
 - `--semantic-alignment-lambda`: optional regularizer for `basis_mixture` when semantic embeddings are enabled (see `run_gpu_method --help`)
 - `--epochs`
@@ -515,7 +524,7 @@ Example for PrimeKG (OpenAI):
 
 ```bash
 .venv/bin/python -m kgml_new.scripts.generate_relation_embeddings \
-  --input kg.csv \
+  --input data/kg.csv \
   --output cache/primekg-relations.pt \
   --embedding-model openai
 ```
@@ -525,7 +534,7 @@ Important arguments:
 - `--input`: CSV, TSV, or pickle path
 - `--input-format {auto,csv,pickle}`
 - `--output`: `.pt` cache file to create
-- `--embedding-model {openai,sapbert,random}`: **required choice**—there is no `--semantic` flag on this script
+- `--embedding-model {openai,gemini,sapbert,e5,random}`: **required choice**—there is no `--semantic` flag on this script
 - `--relation-text-mode {raw,canonical}`: prompt style for embedding text
 - `--edge-dim`: width for **random** relation vectors; OpenAI/SapBERT caches store full model width
 - `--max-edges`: useful for smoke tests and slice-matched caches
@@ -545,7 +554,7 @@ PrimeKG example:
 
 ```bash
 .venv/bin/python -m kgml_new.scripts.run_txgnn \
-  --input kg.csv \
+  --input data/kg.csv \
   --relation indication \
   --epochs 20 \
   --output results/txgnn-indication.json
@@ -555,7 +564,7 @@ When a relation name appears across multiple typed edges, disambiguate it:
 
 ```bash
 .venv/bin/python -m kgml_new.scripts.run_txgnn \
-  --input kg.csv \
+  --input data/kg.csv \
   --relation indication \
   --source-node-type drug \
   --target-node-type disease \

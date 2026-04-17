@@ -16,7 +16,7 @@ export PYTHONPATH=src
 
 .venv/bin/python -m kgml_new.scripts.run_gpu_method \
   --method node2vec \
-  --csv kg.csv \
+  --csv data/kg.csv \
   --device cuda \
   --batch-size 1024 \
   --epochs 20 \

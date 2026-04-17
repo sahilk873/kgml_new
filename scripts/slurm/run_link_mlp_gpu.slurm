@@ -16,7 +16,7 @@ export PYTHONPATH=src
 
 .venv_legacy_gpu/bin/python -m kgml_new.scripts.run_gpu_method \
   --method link_mlp \
-  --csv kg.csv \
+  --csv data/kg.csv \
   --device cuda \
   --batch-size 256 \
   --epochs 50 \

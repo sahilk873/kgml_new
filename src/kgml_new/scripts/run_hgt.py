@@ -9,13 +9,15 @@ import torch
 
 from kgml_new.data.loaders import GraphCSVSpec, PRIMEKG_CSV_SPEC, load_graph_csv, load_pickled_graph
 from kgml_new.data.hetero import networkx_to_heterodata
-from kgml_new.models.txgnn import TxGNN
+from kgml_new.models.hgt import HGTLinkPredictor
+from kgml_new.training.hgt_train import evaluate_hgt_relation, train_hgt
 from kgml_new.training.splits import create_edge_split
-from kgml_new.training.txgnn_train import evaluate_relation, train_txgnn
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train TxGNN-style hetero model on a typed KG.")
+    parser = argparse.ArgumentParser(
+        description="Train standalone HGT (Heterogeneous Graph Transformer) link prediction on a typed KG."
+    )
     parser.add_argument("--input", "--csv", dest="input_path", type=Path, default=Path("data/kg.csv"))
     parser.add_argument(
         "--input-format",
@@ -37,9 +39,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--in-dim", type=int, default=64)
     parser.add_argument("--num-layers", type=int, default=2)
+    parser.add_argument("--num-heads", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--prototype-k", type=int, default=5)
-    parser.add_argument("--prototype-alpha", type=float, default=0.5)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--optuna-trials", type=int, default=0)
@@ -103,7 +104,7 @@ def _resolve_target_edge_type(args: argparse.Namespace, edge_types: list[tuple[s
     return relation_matches[0]
 
 
-def run_txgnn_experiment(
+def run_hgt_experiment(
     args: argparse.Namespace,
     *,
     device: torch.device,
@@ -115,18 +116,16 @@ def run_txgnn_experiment(
     test_pos: torch.Tensor,
     test_neg: torch.Tensor,
 ) -> dict:
-    model = TxGNN(
+    model = HGTLinkPredictor(
         metadata=data.metadata(),
         in_channels=args.in_dim,
         hidden_channels=args.in_dim,
         out_channels=args.in_dim,
         num_layers=args.num_layers,
+        num_heads=args.num_heads,
         dropout=args.dropout,
-        use_prototypes=True,
-        prototype_k=args.prototype_k,
-        prototype_alpha=float(args.prototype_alpha),
     )
-    history = train_txgnn(
+    history = train_hgt(
         model,
         data,
         edge_type,
@@ -137,11 +136,11 @@ def run_txgnn_experiment(
         device=device,
     )
 
-    val_auc, val_ap = evaluate_relation(model, data, edge_type, val_pos, val_neg, device)
-    test_auc, test_ap = evaluate_relation(model, data, edge_type, test_pos, test_neg, device)
+    val_auc, val_ap = evaluate_hgt_relation(model, data, edge_type, val_pos, val_neg, device)
+    test_auc, test_ap = evaluate_hgt_relation(model, data, edge_type, test_pos, test_neg, device)
 
     return {
-        "method": "txgnn",
+        "method": "hgt",
         "relation": edge_type[1],
         "edge_type": list(edge_type),
         "input_path": str(args.input_path),
@@ -150,6 +149,11 @@ def run_txgnn_experiment(
         "learning_rate": float(args.learning_rate),
         "batch_size": int(args.batch_size),
         "neg_samples": int(args.neg_samples),
+        "num_heads": args.num_heads,
+        "num_layers": args.num_layers,
+        "dropout": args.dropout,
+        "hidden_channels": model.hidden_channels,
+        "out_channels": model.out_channels,
         "num_nodes": {k: int(v.num_nodes) for k, v in data.node_items()},
         "num_train_edges": int(train_pos.size(1)),
         "num_val_edges": int(val_pos.size(1)),
@@ -163,10 +167,6 @@ def run_txgnn_experiment(
         "val_metrics": {"roc_auc": float(val_auc), "average_precision": float(val_ap)},
         "test_metrics": {"roc_auc": float(test_auc), "average_precision": float(test_ap)},
         "final_metrics": {"roc_auc": float(test_auc), "average_precision": float(test_ap)},
-        "num_layers": args.num_layers,
-        "dropout": args.dropout,
-        "prototype_k": args.prototype_k,
-        "prototype_alpha": float(args.prototype_alpha),
     }
 
 
@@ -205,7 +205,7 @@ def main() -> None:
         from kgml_new.tuning.spaces import (
             apply_param_dict_to_namespace,
             suggest_hetero_link_params,
-            suggest_txgnn_arch_params,
+            suggest_hgt_arch_params,
         )
 
         optuna = require_optuna()
@@ -213,7 +213,7 @@ def main() -> None:
         sampler = optuna.samplers.TPESampler(seed=optuna_seed)
         if args.optuna_storage:
             study = optuna.create_study(
-                study_name=args.optuna_study or "kgml_txgnn",
+                study_name=args.optuna_study or "kgml_hgt",
                 storage=args.optuna_storage,
                 direction="maximize",
                 sampler=sampler,
@@ -225,9 +225,9 @@ def main() -> None:
         def _objective(trial: optuna.Trial) -> float:
             t_args = copy.deepcopy(args)
             suggest_hetero_link_params(trial, t_args)
-            suggest_txgnn_arch_params(trial, t_args)
+            suggest_hgt_arch_params(trial, t_args)
             torch.manual_seed(optuna_seed + trial.number * 100_003)
-            out = run_txgnn_experiment(
+            out = run_hgt_experiment(
                 t_args,
                 device=device,
                 data=data,
@@ -249,7 +249,7 @@ def main() -> None:
         t_args = copy.deepcopy(args)
         apply_param_dict_to_namespace(t_args, study.best_params)
         torch.manual_seed(args.seed)
-        output = run_txgnn_experiment(
+        output = run_hgt_experiment(
             t_args,
             device=device,
             data=data,
@@ -267,7 +267,7 @@ def main() -> None:
             "metric": args.optuna_metric,
         }
     else:
-        output = run_txgnn_experiment(
+        output = run_hgt_experiment(
             args,
             device=device,
             data=data,

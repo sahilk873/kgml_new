@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import logging
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import torch
 
-from kgml_new.config import LinkMLPConfig, Node2VecConfig, TrainConfig
+from kgml_new.config import (
+    TrainConfig,
+    link_mlp_config_from_run_gpu_method_args,
+    node2vec_config_from_run_gpu_method_args,
+    train_config_from_run_gpu_method_args,
+)
 from kgml_new.logging_config import parse_log_level, setup_kgml_logging
 from kgml_new.data.datasets import (
     compute_relation_diversity_buckets,
@@ -34,6 +41,11 @@ from kgml_new.embeddings.semantic import (
 from kgml_new.models.baseline_gcn import BaselineGCN
 from kgml_new.models.baseline_sage import NEIGHBOR_AGGREGATIONS, BaselineGraphSAGE
 from kgml_new.models.edge_aware_sage import EDGE_RELATION_MODES, build_edge_aware_model
+from kgml_new.models.semantic_relation_inject import (
+    FilmSageSemanticInjectBundle,
+    RelDistMultDecodeHead,
+)
+from kgml_new.training.relation_decode_batch import build_canonical_uv_relation_lookup
 from kgml_new.eval.ood_difficulty import (
     OODDifficultyConfig,
     build_ood_json_payload,
@@ -44,7 +56,7 @@ from kgml_new.eval.ood_difficulty import (
 from kgml_new.training.eval import (
     compute_relation_holdout_metrics,
     evaluate_inductive_link_prediction,
-    link_prediction_dot_product,
+    grouped_link_prediction_metrics,
 )
 from kgml_new.training.link_unsupervised import (
     compute_node_embeddings,
@@ -55,9 +67,30 @@ from kgml_new.training.node2vec_train import (
     train_node2vec_embeddings_with_validation,
 )
 from kgml_new.training.train_link_mlp import train_link_mlp_with_validation
-from kgml_new.runtime import resolve_device
+from kgml_new.runtime import resolve_device, seed_everything
 
 _LOG = logging.getLogger("kgml_new.scripts.run_gpu_method")
+
+
+def _grouped_dot_metrics(
+    z: torch.Tensor,
+    pos_edge_index: torch.Tensor,
+    neg_edge_index: torch.Tensor,
+    negatives_per_pos: int,
+) -> dict[str, float]:
+    pos_scores = (
+        (z[pos_edge_index[0].long()] * z[pos_edge_index[1].long()]).sum(dim=-1).detach().cpu().numpy()
+    )
+    neg_scores_flat = (
+        (z[neg_edge_index[0].long()] * z[neg_edge_index[1].long()]).sum(dim=-1).detach().cpu()
+    )
+    if neg_scores_flat.numel() % negatives_per_pos != 0:
+        raise ValueError(
+            "neg_edge_index count must be divisible by negatives_per_pos "
+            f"({neg_scores_flat.numel()} vs {negatives_per_pos})"
+        )
+    neg_scores = neg_scores_flat.view(-1, negatives_per_pos).numpy()
+    return grouped_link_prediction_metrics(pos_scores, neg_scores)
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,6 +103,8 @@ def parse_args() -> argparse.Namespace:
             "baseline_sage",
             "baseline_gcn",
             "edge_aware_sage",
+            "edge_aware_sage_node_emb",
+            "edge_aware_sage_film_semdec",
             "node2vec",
             "link_mlp",
             "edge_aware_link_mlp",
@@ -77,7 +112,7 @@ def parse_args() -> argparse.Namespace:
         required=True,
     )
     parser.add_argument(
-        "--input", "--csv", dest="input_path", type=Path, default=Path("kg.csv")
+        "--input", "--csv", dest="input_path", type=Path, default=Path("data/kg.csv")
     )
     parser.add_argument(
         "--input-format",
@@ -98,9 +133,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--split-protocol",
-        choices=("node", "edge"),
+        choices=("node", "node_category", "edge"),
         default="node",
-        help="node: hold out entities from training edges for OOD evaluation; edge: legacy edge-disjoint split",
+        help="node: random node-disjoint split; node_category: hold out node types (see "
+        "--held-out-node-categories); edge: edge-disjoint split.",
     )
     parser.add_argument(
         "--negative-sampling-mode",
@@ -123,6 +159,14 @@ def parse_args() -> argparse.Namespace:
         "Repeat flag or pass multiple names.",
     )
     parser.add_argument(
+        "--held-out-node-categories",
+        nargs="*",
+        default=[],
+        metavar="TYPE",
+        help="With --split-protocol node_category: node_type values (graph node attribute) "
+        "held out from training positives; val/test query edges touch partitioned held-out nodes.",
+    )
+    parser.add_argument(
         "--semantic",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -137,15 +181,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--embedding-model",
         type=str,
-        choices=["openai", "sapbert", "random"],
+        choices=["openai", "gemini", "sapbert", "e5", "random"],
         default=None,
-        help="Embedding model for relation embeddings: openai, sapbert (PubMedBERT), or random.",
+        help="Embedding model for relation embeddings: openai, gemini, sapbert (PubMedBERT), e5, or random.",
     )
     parser.add_argument(
         "--sapbert-model",
         type=str,
         default="cambridgeltl/SapBERT-from-PubMedBERT-fulltext-mean-token",
         help="HuggingFace model name for SapBERT",
+    )
+    parser.add_argument(
+        "--e5-model",
+        type=str,
+        default="intfloat/e5-base-v2",
+        help="HuggingFace model name for E5",
+    )
+    parser.add_argument(
+        "--gemini-model",
+        type=str,
+        default="gemini-3.1-flash-lite-preview",
+        help="Gemini model name for embeddings.",
     )
     parser.add_argument(
         "--strict-semantic",
@@ -199,6 +255,13 @@ def parse_args() -> argparse.Namespace:
         help="Weight for semantic alignment regularizer in basis_mixture mode.",
     )
     parser.add_argument(
+        "--rel-residual-scale",
+        type=float,
+        default=0.25,
+        help="For edge_aware_sage_film_semdec: scale of trainable MLP residual on frozen "
+        "relation rows (encoder) before DistMult-style decode.",
+    )
+    parser.add_argument(
         "--epochs",
         type=int,
         default=100,
@@ -206,6 +269,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--in-dim", type=int, default=64)
+    parser.add_argument(
+        "--node-embeddings-path",
+        type=Path,
+        default=None,
+        help="Optional .pt file with node embeddings [num_nodes, dim]. Required for "
+        "edge_aware_sage_node_emb.",
+    )
+    parser.add_argument(
+        "--node-embeddings-key",
+        type=str,
+        default=None,
+        help="If --node-embeddings-path stores a dict, pick this key. If omitted, tries "
+        "common keys: embeddings, node_embeddings, x, features.",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--device",
@@ -288,6 +365,108 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Stem for OOD CSV filename (default: --output stem).",
     )
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=None,
+        help="Adam LR for unsupervised encoder training (default: TrainConfig).",
+    )
+    parser.add_argument(
+        "--train-batch-size",
+        type=int,
+        default=None,
+        help="Mini-batch size for batched unsupervised training (default: TrainConfig).",
+    )
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        default=None,
+        help="Dropout on GNN layers (default: TrainConfig).",
+    )
+    parser.add_argument(
+        "--num-layers",
+        type=int,
+        default=None,
+        help="Number of message-passing layers (default: TrainConfig).",
+    )
+    parser.add_argument(
+        "--hidden-dim",
+        type=int,
+        default=None,
+        help="Hidden channel width (default: TrainConfig).",
+    )
+    parser.add_argument(
+        "--edge-dim",
+        type=int,
+        default=None,
+        help="Relation embedding width for edge-aware paths (default: TrainConfig).",
+    )
+    parser.add_argument(
+        "--num-neighbors-spec",
+        type=str,
+        default=None,
+        help="Comma-separated neighbor sample sizes per layer, e.g. 10,10.",
+    )
+    parser.add_argument(
+        "--link-mlp-learning-rate",
+        type=float,
+        default=None,
+        help="Adam LR for link MLP decoder head (default: LinkMLPConfig).",
+    )
+    parser.add_argument(
+        "--link-mlp-dropout",
+        type=float,
+        default=None,
+        help="Dropout for link MLP (default: LinkMLPConfig).",
+    )
+    parser.add_argument(
+        "--link-mlp-batch-size",
+        type=int,
+        default=None,
+        help="Batch size for link MLP (default: LinkMLPConfig).",
+    )
+    parser.add_argument(
+        "--link-mlp-hidden-dims",
+        type=str,
+        default=None,
+        help='Hidden dims for link MLP, comma-separated, e.g. "256,128".',
+    )
+    parser.add_argument(
+        "--optuna-trials",
+        type=int,
+        default=0,
+        help="If >0, run Optuna hyperparameter search (requires pip install optuna).",
+    )
+    parser.add_argument(
+        "--optuna-metric",
+        choices=("val_auc", "val_ap"),
+        default="val_auc",
+        help="Validation metric to maximize during Optuna.",
+    )
+    parser.add_argument(
+        "--optuna-storage",
+        type=str,
+        default=None,
+        help="Optuna RDB storage URL, e.g. sqlite:///study.db",
+    )
+    parser.add_argument(
+        "--optuna-study",
+        type=str,
+        default=None,
+        help="Study name when using --optuna-storage.",
+    )
+    parser.add_argument(
+        "--optuna-seed",
+        type=int,
+        default=None,
+        help="Sampler seed for Optuna (default: --seed).",
+    )
+    parser.add_argument(
+        "--optuna-timeout",
+        type=float,
+        default=None,
+        help="Optional wall-clock timeout in seconds for the whole study.",
+    )
     return parser.parse_args()
 
 
@@ -326,6 +505,12 @@ def _held_out_relations_from_args(args: argparse.Namespace) -> list[str] | None:
     return names or None
 
 
+def _held_out_node_categories_from_args(args: argparse.Namespace) -> list[str] | None:
+    names = [str(x).strip() for x in getattr(args, "held_out_node_categories", []) or []]
+    names = [x for x in names if x]
+    return names or None
+
+
 def build_dataset(args: argparse.Namespace):
     graph = _load_graph(args)
     dataset = prepare_link_prediction_dataset(
@@ -340,6 +525,7 @@ def build_dataset(args: argparse.Namespace):
         decoder=args.decoder,
         shuffle_relations=args.shuffle_relations,
         held_out_relations=_held_out_relations_from_args(args),
+        held_out_node_categories=_held_out_node_categories_from_args(args),
     )
     return graph, dataset
 
@@ -355,11 +541,16 @@ def _expected_prepared_cache_meta(args: argparse.Namespace) -> dict:
     rf = _resolved_input_format_for_args(args)
     neg_resolved = args.negative_sampling_mode
     if neg_resolved is None:
-        neg_resolved = "type_matched" if args.split_protocol == "node" else "global"
+        neg_resolved = (
+            "type_matched"
+            if args.split_protocol in ("node", "node_category")
+            else "global"
+        )
     spec_dict = (
         graph_csv_spec_to_dict(_csv_spec_from_args(args)) if rf == "csv" else None
     )
     ho = _held_out_relations_from_args(args)
+    ho_cat = _held_out_node_categories_from_args(args)
     meta = {
         "split_protocol": args.split_protocol,
         "seed": args.seed,
@@ -379,6 +570,8 @@ def _expected_prepared_cache_meta(args: argparse.Namespace) -> dict:
     }
     if ho:
         meta["held_out_relations"] = sorted(ho)
+    if ho_cat:
+        meta["held_out_node_categories"] = sorted(ho_cat)
     return meta
 
 
@@ -396,6 +589,74 @@ def _resolved_embedding_model(args: argparse.Namespace) -> str:
     if args.embedding_model is not None:
         return str(args.embedding_model)
     return "random" if not args.semantic else "openai"
+
+
+def _extract_node_embedding_tensor(
+    payload: object,
+    *,
+    key: str | None,
+) -> torch.Tensor:
+    if isinstance(payload, torch.Tensor):
+        return payload
+    if isinstance(payload, dict):
+        if key is not None:
+            value = payload.get(key)
+            if not isinstance(value, torch.Tensor):
+                raise ValueError(
+                    f"Node embedding key '{key}' not found as a tensor in payload."
+                )
+            return value
+        for candidate in ("embeddings", "node_embeddings", "x", "features"):
+            value = payload.get(candidate)
+            if isinstance(value, torch.Tensor):
+                return value
+        raise ValueError(
+            "Node embedding payload is a dict but contains no tensor under "
+            "keys [embeddings, node_embeddings, x, features]. "
+            "Use --node-embeddings-key to select the correct tensor."
+        )
+    raise ValueError(
+        "Unsupported node embedding payload type. Expected torch.Tensor or dict."
+    )
+
+
+def _maybe_apply_external_node_embeddings(
+    *,
+    args: argparse.Namespace,
+    dataset,
+    required: bool,
+) -> torch.Tensor | None:
+    emb_path = args.node_embeddings_path
+    if emb_path is None:
+        if required:
+            raise SystemExit(
+                "This method requires --node-embeddings-path pointing to a .pt tensor "
+                "with shape [num_nodes, dim]."
+            )
+        return None
+    if not emb_path.is_file():
+        raise SystemExit(f"Node embeddings file not found: {emb_path}")
+
+    payload = torch.load(emb_path, map_location="cpu")
+    node_emb = _extract_node_embedding_tensor(payload, key=args.node_embeddings_key)
+    if node_emb.ndim != 2:
+        raise SystemExit(
+            f"Node embeddings must be rank-2 [num_nodes, dim], got shape={tuple(node_emb.shape)}"
+        )
+    if node_emb.size(0) != int(dataset.train_data.num_nodes):
+        raise SystemExit(
+            "Node embedding row count mismatch: "
+            f"embeddings have {int(node_emb.size(0))} rows but graph has "
+            f"{int(dataset.train_data.num_nodes)} nodes."
+        )
+    if not torch.is_floating_point(node_emb):
+        node_emb = node_emb.float()
+    node_emb = node_emb.detach().cpu().to(torch.float32)
+
+    dataset.data.x = node_emb.clone()
+    dataset.train_data.x = node_emb.clone()
+    dataset.full_data.x = node_emb.clone()
+    return node_emb
 
 
 def _maybe_build_semantic_similarity_for_alignment(
@@ -423,6 +684,8 @@ def _maybe_build_semantic_similarity_for_alignment(
         strict_embedding=args.strict_semantic,
         glossary_path=glossary_path,
         sapbert_model=args.sapbert_model,
+        e5_model=args.e5_model,
+        gemini_model=args.gemini_model,
     )
     semantic_sim_matrix = compute_semantic_similarity_matrix(
         rel_emb, relation_lookup
@@ -454,6 +717,8 @@ def build_edge_aware_relation_table(
         strict_embedding=args.strict_semantic,
         glossary_path=glossary_path,
         sapbert_model=args.sapbert_model,
+        e5_model=args.e5_model,
+        gemini_model=args.gemini_model,
     )
     relation_table = build_relation_tensor(rel_emb, relation_lookup, edge_dim, device)
     relation_init = (
@@ -467,6 +732,8 @@ def build_edge_aware_encoder(
     cfg: TrainConfig,
     relation_table: torch.Tensor,
     normalize_output: bool = True,
+    film_semantic_inject: bool = False,
+    rel_residual_scale: float = 0.25,
 ):
     return build_edge_aware_model(
         edge_relation_mode=cfg.edge_relation_mode,
@@ -481,6 +748,8 @@ def build_edge_aware_encoder(
         normalize_output=normalize_output,
         num_relation_bases=cfg.num_relation_bases,
         neighbor_aggr=cfg.neighbor_aggr,
+        film_semantic_inject=film_semantic_inject,
+        rel_residual_scale=rel_residual_scale,
     )
 
 
@@ -490,16 +759,12 @@ def maybe_train_decoder(
     z: torch.Tensor,
     train_pos: torch.Tensor,
     epochs: int,
-    seed: int,
     device: torch.device,
+    run_args: argparse.Namespace,
 ):
     if decoder == "dot":
         return None, None, None
-    mlp_cfg = LinkMLPConfig(
-        epochs=epochs,
-        seed=seed,
-        feature_mode="concat_product",
-    )
+    mlp_cfg = link_mlp_config_from_run_gpu_method_args(run_args, epochs=epochs)
     decoder_model, decoder_last_epoch, decoder_history = train_link_mlp_with_validation(
         z.detach(),
         train_pos,
@@ -656,7 +921,13 @@ def _finalize_eval_and_ood(
     csv_path = Path(args.ood_output_dir) / f"{ood_stem}_edge_predictions.csv"
     edge_mode = (
         args.edge_relation_mode
-        if args.method in ("edge_aware_sage", "edge_aware_link_mlp")
+        if args.method
+        in (
+            "edge_aware_sage",
+            "edge_aware_sage_node_emb",
+            "edge_aware_sage_film_semdec",
+            "edge_aware_link_mlp",
+        )
         else None
     )
     wrote_any = False
@@ -696,57 +967,15 @@ def _finalize_eval_and_ood(
     _LOG.info("phase=ood_csv path=%s", csv_path.resolve())
 
 
-def main() -> None:
-    args = parse_args()
-    setup_kgml_logging(log_file=args.log_file, level=parse_log_level(args.log_level))
-    _LOG.info(
-        "run_gpu_method start argv=%s cwd=%s",
-        sys.argv,
-        Path.cwd(),
-    )
-    torch.manual_seed(args.seed)
-
-    if args.require_cuda and not torch.cuda.is_available():
-        _LOG.error("CUDA required but torch.cuda.is_available() is False")
-        raise SystemExit(
-            "CUDA required (--require-cuda) but unavailable. "
-            "Use a GPU node, load drivers, and install a CUDA PyTorch wheel."
-        )
-    device = resolve_device(args.device)
-    _LOG.info(
-        "device=%s cuda_available=%s gpu_name=%s",
-        device,
-        torch.cuda.is_available(),
-        torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-    )
-
-    _LOG.info(
-        "phase=data method=%s input=%s max_edges=%s split=%s epochs=%s",
-        args.method,
-        args.input_path,
-        args.max_edges,
-        args.split_protocol,
-        args.epochs,
-    )
-    if args.prepared_dataset_cache is not None:
-        pcache = Path(args.prepared_dataset_cache)
-        if not pcache.is_file():
-            raise SystemExit(f"Prepared dataset cache not found: {pcache}")
-        _LOG.info("phase=data source=prepared_dataset_cache path=%s", pcache)
-        dataset, _ = load_prepared_link_prediction_dataset(
-            pcache,
-            expected_meta=_expected_prepared_cache_meta(args),
-        )
-        graph = dataset.graph
-    else:
-        graph, dataset = build_dataset(args)
+def run_gpu_method_experiment(
+    args: argparse.Namespace,
+    *,
+    device: torch.device,
+    graph,
+    dataset,
+) -> dict:
     return_scores = args.compute_ood_difficulty or bool(
         getattr(dataset, "held_out_relation_ids", None)
-    )
-    _LOG.info(
-        "phase=data_done num_train_nodes=%s train_edges=%s",
-        int(dataset.train_data.num_nodes),
-        int(dataset.split.train_pos_edge_index.size(1)),
     )
     train_data = dataset.train_data
     relation_lookup = dataset.relation_lookup
@@ -791,6 +1020,8 @@ def main() -> None:
         if args.glossary_path is not None
         else str(DEFAULT_GLOSSARY_PATH),
         "sapbert_model": args.sapbert_model,
+        "e5_model": args.e5_model,
+        "gemini_model": args.gemini_model,
         "semantic_alignment_lambda": args.semantic_alignment_lambda,
         "edge_relation_mode": args.edge_relation_mode,
         "num_relation_bases": args.num_relation_bases,
@@ -799,7 +1030,7 @@ def main() -> None:
         "epochs": args.epochs,
         "evaluation_protocol": (
             "sampled inductive eval on full adjacency with scored edges removed"
-            if args.split_protocol == "node"
+            if args.split_protocol in ("node", "node_category")
             else "sampled eval on full adjacency with scored edges removed"
         ),
         "relation_diversity_summary": {
@@ -807,12 +1038,25 @@ def main() -> None:
             "max": max(diversity_counts.values()) if diversity_counts else 0,
         },
         "edge_message_concat": args.concat
-        if args.method in ("edge_aware_sage", "edge_aware_link_mlp")
+        if args.method
+        in (
+            "edge_aware_sage",
+            "edge_aware_sage_node_emb",
+            "edge_aware_sage_film_semdec",
+            "edge_aware_link_mlp",
+        )
         and args.edge_relation_mode == "concat"
         else None,
         "neighbor_aggr": args.neighbor_aggr
         if args.method
-        in ("baseline_sage", "edge_aware_sage", "link_mlp", "edge_aware_link_mlp")
+        in (
+            "baseline_sage",
+            "edge_aware_sage",
+            "edge_aware_sage_node_emb",
+            "edge_aware_sage_film_semdec",
+            "link_mlp",
+            "edge_aware_link_mlp",
+        )
         else None,
         "held_out_relations": sorted(dataset.held_out_relations)
         if getattr(dataset, "held_out_relations", None)
@@ -820,6 +1064,13 @@ def main() -> None:
         "held_out_relation_ids": sorted(dataset.held_out_relation_ids)
         if getattr(dataset, "held_out_relation_ids", None)
         else [],
+        "held_out_node_categories": sorted(dataset.held_out_node_categories)
+        if getattr(dataset, "held_out_node_categories", None)
+        else [],
+        "node_embeddings_path": str(args.node_embeddings_path)
+        if args.node_embeddings_path is not None
+        else None,
+        "node_embeddings_key": args.node_embeddings_key,
     }
 
     if args.method == "baseline_sage":
@@ -827,13 +1078,7 @@ def main() -> None:
             "phase=model baseline_sage neighbor_aggr=%s edge_mode=n/a",
             args.neighbor_aggr,
         )
-        cfg = TrainConfig(
-            in_dim=args.in_dim,
-            out_dim=args.in_dim,
-            epochs=args.epochs,
-            seed=args.seed,
-            neighbor_aggr=args.neighbor_aggr,
-        )
+        cfg = train_config_from_run_gpu_method_args(args)
         model = BaselineGraphSAGE(
             cfg.in_dim,
             cfg.hidden_dim,
@@ -858,8 +1103,8 @@ def main() -> None:
             z=z,
             train_pos=train_pos,
             epochs=args.epochs,
-            seed=args.seed,
             device=device,
+            run_args=args,
         )
         _LOG.info("phase=eval_val (baseline_sage)")
         val_metrics = evaluate_inductive_link_prediction(
@@ -911,7 +1156,7 @@ def main() -> None:
         )
 
     elif args.method == "baseline_gcn":
-        cfg = TrainConfig(in_dim=args.in_dim, out_dim=args.in_dim, epochs=args.epochs, seed=args.seed)
+        cfg = train_config_from_run_gpu_method_args(args)
         model = BaselineGCN(
             cfg.in_dim,
             cfg.hidden_dim,
@@ -933,8 +1178,8 @@ def main() -> None:
             z=z,
             train_pos=train_pos,
             epochs=args.epochs,
-            seed=args.seed,
             device=device,
+            run_args=args,
         )
         val_metrics = evaluate_inductive_link_prediction(
             model,
@@ -992,16 +1237,7 @@ def main() -> None:
             args.semantic_cache,
             _resolved_embedding_model(args),
         )
-        cfg = TrainConfig(
-            in_dim=args.in_dim,
-            out_dim=args.in_dim,
-            epochs=args.epochs,
-            seed=args.seed,
-            edge_relation_mode=args.edge_relation_mode,
-            num_relation_bases=args.num_relation_bases,
-            concat=args.concat,
-            neighbor_aggr=args.neighbor_aggr,
-        )
+        cfg = train_config_from_run_gpu_method_args(args)
         edge_dim = cfg.edge_dim
         _LOG.info("phase=relation_table (edge_aware)")
         relation_table, relation_init = build_edge_aware_relation_table(
@@ -1042,8 +1278,8 @@ def main() -> None:
             z=z,
             train_pos=train_pos,
             epochs=args.epochs,
-            seed=args.seed,
             device=device,
+            run_args=args,
         )
         _LOG.info("phase=eval_val (edge_aware_sage)")
         val_metrics = evaluate_inductive_link_prediction(
@@ -1095,8 +1331,253 @@ def main() -> None:
             test_neg=test_neg,
         )
 
+    elif args.method == "edge_aware_sage_node_emb":
+        _LOG.info(
+            "phase=model edge_aware_sage_node_emb neighbor_aggr=%s edge_relation_mode=%s "
+            "semantic_cache=%s embedding_resolved=%s",
+            args.neighbor_aggr,
+            args.edge_relation_mode,
+            args.semantic_cache,
+            _resolved_embedding_model(args),
+        )
+        external_x = _maybe_apply_external_node_embeddings(
+            args=args,
+            dataset=dataset,
+            required=True,
+        )
+        if external_x is None:
+            raise RuntimeError("Expected external node embeddings for edge_aware_sage_node_emb.")
+        cfg = train_config_from_run_gpu_method_args(args)
+        node_dim = int(external_x.size(1))
+        if cfg.in_dim != node_dim or cfg.out_dim != node_dim:
+            _LOG.info(
+                "phase=node_emb_dim_override old_in_dim=%s old_out_dim=%s new_dim=%s",
+                cfg.in_dim,
+                cfg.out_dim,
+                node_dim,
+            )
+            cfg = replace(cfg, in_dim=node_dim, out_dim=node_dim)
+        edge_dim = cfg.edge_dim
+        _LOG.info("phase=relation_table (edge_aware_node_emb)")
+        relation_table, relation_init = build_edge_aware_relation_table(
+            args=args,
+            training_graph=dataset.graph,
+            relation_lookup=relation_lookup,
+            edge_dim=edge_dim,
+            device=device,
+        )
+        model = build_edge_aware_encoder(cfg=cfg, relation_table=relation_table)
+
+        semantic_sim_matrix = _maybe_build_semantic_similarity_for_alignment(
+            args=args,
+            graph=dataset.graph,
+            relation_lookup=relation_lookup,
+            relation_table=relation_table,
+            device=device,
+        )
+
+        _LOG.info("phase=train_start (edge_aware_sage_node_emb batched)")
+        model, last_epoch, history = train_unsupervised_batched(
+            model,
+            train_data,
+            train_pos,
+            cfg,
+            device=device,
+            edge_aware=True,
+            semantic_similarity_matrix=semantic_sim_matrix,
+            semantic_alignment_lambda=args.semantic_alignment_lambda,
+            edge_attr_for_alignment=train_data.edge_attr,
+            alignment_train_pos_edge_index=train_pos,
+            alignment_train_pos_edge_attr=dataset.train_pos_edge_attr,
+        )
+        _LOG.info("phase=train_done last_epoch=%s", last_epoch)
+        z = compute_node_embeddings(model, train_data, device, edge_aware=True)
+        decoder_model, decoder_last_epoch, decoder_history = maybe_train_decoder(
+            decoder=args.decoder,
+            z=z,
+            train_pos=train_pos,
+            epochs=args.epochs,
+            device=device,
+            run_args=args,
+        )
+        _LOG.info("phase=eval_val (edge_aware_sage_node_emb)")
+        val_metrics = evaluate_inductive_link_prediction(
+            model,
+            dataset.full_data,
+            pos_edge_index=val_pos,
+            neg_edge_index=val_neg,
+            negatives_per_pos=dataset.negatives_per_pos,
+            device=device,
+            edge_aware=True,
+            num_neighbors=cfg.num_neighbors,
+            decoder=args.decoder,
+            decoder_model=decoder_model,
+            query_buckets=val_query_buckets,
+            return_scores=return_scores,
+        )
+        _LOG.info("phase=eval_test (edge_aware_sage_node_emb)")
+        test_metrics = evaluate_inductive_link_prediction(
+            model,
+            dataset.full_data,
+            pos_edge_index=test_pos,
+            neg_edge_index=test_neg,
+            negatives_per_pos=dataset.negatives_per_pos,
+            device=device,
+            edge_aware=True,
+            num_neighbors=cfg.num_neighbors,
+            decoder=args.decoder,
+            decoder_model=decoder_model,
+            query_buckets=test_query_buckets,
+            return_scores=return_scores,
+        )
+        output["train_embedding_shape"] = list(z.shape)
+        output["relation_init"] = relation_init
+        output["node_embedding_dim"] = node_dim
+        output["last_epoch"] = last_epoch
+        output["history"] = history_dict(history)
+        if decoder_history is not None:
+            output["decoder_last_epoch"] = decoder_last_epoch
+            output["decoder_history"] = history_dict(decoder_history)
+        _finalize_eval_and_ood(
+            output,
+            val_metrics=val_metrics,
+            test_metrics=test_metrics,
+            args=args,
+            dataset=dataset,
+            train_pos=train_pos,
+            val_pos=val_pos,
+            val_neg=val_neg,
+            test_pos=test_pos,
+            test_neg=test_neg,
+        )
+
+    elif args.method == "edge_aware_sage_film_semdec":
+        if args.edge_relation_mode != "film":
+            _LOG.warning(
+                "edge_aware_sage_film_semdec uses FiLM + semantic adapter; forcing "
+                "edge_relation_mode from %s to film.",
+                args.edge_relation_mode,
+            )
+            args.edge_relation_mode = "film"
+        if args.decoder != "dot":
+            _LOG.warning(
+                "edge_aware_sage_film_semdec trains a relation-conditioned DistMult decode "
+                "head; ignoring --decoder=%s for eval (dot + rel_decode_bundle).",
+                args.decoder,
+            )
+        _LOG.info(
+            "phase=model edge_aware_sage_film_semdec neighbor_aggr=%s rel_residual_scale=%s "
+            "semantic_cache=%s embedding_resolved=%s",
+            args.neighbor_aggr,
+            args.rel_residual_scale,
+            args.semantic_cache,
+            _resolved_embedding_model(args),
+        )
+        cfg = train_config_from_run_gpu_method_args(args)
+        edge_dim = cfg.edge_dim
+        _LOG.info("phase=relation_table (edge_aware_sage_film_semdec)")
+        relation_table, relation_init = build_edge_aware_relation_table(
+            args=args,
+            training_graph=dataset.graph,
+            relation_lookup=relation_lookup,
+            edge_dim=edge_dim,
+            device=device,
+        )
+        encoder = build_edge_aware_encoder(
+            cfg=cfg,
+            relation_table=relation_table,
+            film_semantic_inject=True,
+            rel_residual_scale=float(args.rel_residual_scale),
+        )
+        rel_dim = int(relation_table.shape[1])
+        decode_head = RelDistMultDecodeHead(rel_dim, cfg.out_dim)
+        model = FilmSageSemanticInjectBundle(encoder, decode_head)
+
+        semantic_sim_matrix = _maybe_build_semantic_similarity_for_alignment(
+            args=args,
+            graph=dataset.graph,
+            relation_lookup=relation_lookup,
+            relation_table=relation_table,
+            device=device,
+        )
+
+        train_uv_relation = build_canonical_uv_relation_lookup(
+            train_pos.cpu(),
+            dataset.train_pos_edge_attr.cpu(),
+        )
+
+        _LOG.info("phase=train_start (edge_aware_sage_film_semdec batched)")
+        model, last_epoch, history = train_unsupervised_batched(
+            model,
+            train_data,
+            train_pos,
+            cfg,
+            device=device,
+            edge_aware=True,
+            semantic_similarity_matrix=semantic_sim_matrix,
+            semantic_alignment_lambda=args.semantic_alignment_lambda,
+            edge_attr_for_alignment=train_data.edge_attr,
+            alignment_train_pos_edge_index=train_pos,
+            alignment_train_pos_edge_attr=dataset.train_pos_edge_attr,
+            relation_decode_bundle=model,
+            train_uv_relation_lookup=train_uv_relation,
+            metric_eval_data=dataset.full_data,
+        )
+        _LOG.info("phase=train_done last_epoch=%s", last_epoch)
+        z = compute_node_embeddings(model, train_data, device, edge_aware=True)
+        _LOG.info("phase=eval_val (edge_aware_sage_film_semdec)")
+        val_metrics = evaluate_inductive_link_prediction(
+            model,
+            dataset.full_data,
+            pos_edge_index=val_pos,
+            neg_edge_index=val_neg,
+            negatives_per_pos=dataset.negatives_per_pos,
+            device=device,
+            edge_aware=True,
+            num_neighbors=cfg.num_neighbors,
+            decoder="dot",
+            decoder_model=None,
+            query_buckets=val_query_buckets,
+            return_scores=return_scores,
+            rel_decode_bundle=model,
+        )
+        _LOG.info("phase=eval_test (edge_aware_sage_film_semdec)")
+        test_metrics = evaluate_inductive_link_prediction(
+            model,
+            dataset.full_data,
+            pos_edge_index=test_pos,
+            neg_edge_index=test_neg,
+            negatives_per_pos=dataset.negatives_per_pos,
+            device=device,
+            edge_aware=True,
+            num_neighbors=cfg.num_neighbors,
+            decoder="dot",
+            decoder_model=None,
+            query_buckets=test_query_buckets,
+            return_scores=return_scores,
+            rel_decode_bundle=model,
+        )
+        output["train_embedding_shape"] = list(z.shape)
+        output["relation_init"] = relation_init
+        output["semantic_inject"] = "film_adapter_distmult"
+        output["rel_residual_scale"] = float(args.rel_residual_scale)
+        output["last_epoch"] = last_epoch
+        output["history"] = history_dict(history)
+        _finalize_eval_and_ood(
+            output,
+            val_metrics=val_metrics,
+            test_metrics=test_metrics,
+            args=args,
+            dataset=dataset,
+            train_pos=train_pos,
+            val_pos=val_pos,
+            val_neg=val_neg,
+            test_pos=test_pos,
+            test_neg=test_neg,
+        )
+
     elif args.method == "node2vec":
-        cfg = Node2VecConfig(epochs=args.epochs, seed=args.seed, embedding_dim=64)
+        cfg = node2vec_config_from_run_gpu_method_args(args)
         _, z, last_epoch, history = train_node2vec_embeddings_with_validation(
             train_data,
             cfg,
@@ -1105,31 +1586,30 @@ def main() -> None:
         output["train_embedding_shape"] = list(z.shape)
         output["last_epoch"] = last_epoch
         output["history"] = history_dict(history)
-        if args.split_protocol == "node":
+        if args.split_protocol in ("node", "node_category"):
             output["warning"] = (
                 "node2vec was trained on the train-node subgraph only; unseen nodes do not "
                 "receive inductive embeddings, so this run is excluded from the main node-split comparison."
             )
             output["comparable_under_node_split"] = False
         else:
-            output["val_metrics"] = link_prediction_dot_product(z, val_pos, val_neg)
-            output["test_metrics"] = link_prediction_dot_product(z, test_pos, test_neg)
+            output["val_metrics"] = _grouped_dot_metrics(
+                z, val_pos, val_neg, args.negatives_per_pos
+            )
+            output["test_metrics"] = _grouped_dot_metrics(
+                z, test_pos, test_neg, args.negatives_per_pos
+            )
             output["metrics"] = output["test_metrics"]
             output["comparable_under_node_split"] = True
         if args.compute_ood_difficulty:
             _LOG.warning(
                 "OOD difficulty is not available for node2vec (no per-edge score export); "
-                "use baseline_sage, edge_aware_sage, link_mlp, or edge_aware_link_mlp."
+                "use baseline_sage, edge_aware_sage, edge_aware_sage_node_emb, "
+                "edge_aware_sage_film_semdec, link_mlp, or edge_aware_link_mlp."
             )
 
     elif args.method == "link_mlp":
-        base_cfg = TrainConfig(
-            in_dim=args.in_dim,
-            out_dim=args.in_dim,
-            epochs=args.epochs,
-            seed=args.seed,
-            neighbor_aggr=args.neighbor_aggr,
-        )
+        base_cfg = train_config_from_run_gpu_method_args(args)
         base_model = BaselineGraphSAGE(
             base_cfg.in_dim,
             base_cfg.hidden_dim,
@@ -1149,11 +1629,7 @@ def main() -> None:
         z = compute_node_embeddings(
             base_model, train_data, device, edge_aware=False
         ).detach()
-        mlp_cfg = LinkMLPConfig(
-            epochs=args.epochs,
-            seed=args.seed,
-            feature_mode="concat_product",
-        )
+        mlp_cfg = link_mlp_config_from_run_gpu_method_args(args)
         mlp, last_epoch, history = train_link_mlp_with_validation(
             z,
             train_pos,
@@ -1207,16 +1683,7 @@ def main() -> None:
         )
 
     else:
-        base_cfg = TrainConfig(
-            in_dim=args.in_dim,
-            out_dim=args.in_dim,
-            epochs=args.epochs,
-            seed=args.seed,
-            edge_relation_mode=args.edge_relation_mode,
-            num_relation_bases=args.num_relation_bases,
-            concat=args.concat,
-            neighbor_aggr=args.neighbor_aggr,
-        )
+        base_cfg = train_config_from_run_gpu_method_args(args)
         edge_dim = base_cfg.edge_dim
         relation_table, relation_init = build_edge_aware_relation_table(
             args=args,
@@ -1251,11 +1718,7 @@ def main() -> None:
         z = compute_node_embeddings(
             base_model, train_data, device, edge_aware=True
         ).detach()
-        mlp_cfg = LinkMLPConfig(
-            epochs=args.epochs,
-            seed=args.seed,
-            feature_mode="concat_product",
-        )
+        mlp_cfg = link_mlp_config_from_run_gpu_method_args(args)
         mlp, last_epoch, history = train_link_mlp_with_validation(
             z,
             train_pos,
@@ -1309,6 +1772,129 @@ def main() -> None:
             test_neg=test_neg,
         )
 
+    return output
+
+def main() -> None:
+    args = parse_args()
+    setup_kgml_logging(log_file=args.log_file, level=parse_log_level(args.log_level))
+    _LOG.info(
+        "run_gpu_method start argv=%s cwd=%s",
+        sys.argv,
+        Path.cwd(),
+    )
+    seed_everything(args.seed)
+
+    if args.require_cuda and not torch.cuda.is_available():
+        _LOG.error("CUDA required but torch.cuda.is_available() is False")
+        raise SystemExit(
+            "CUDA required (--require-cuda) but unavailable. "
+            "Use a GPU node, load drivers, and install a CUDA PyTorch wheel."
+        )
+    device = resolve_device(args.device)
+    _LOG.info(
+        "device=%s cuda_available=%s gpu_name=%s",
+        device,
+        torch.cuda.is_available(),
+        torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+    )
+
+    _LOG.info(
+        "phase=data method=%s input=%s max_edges=%s split=%s epochs=%s",
+        args.method,
+        args.input_path,
+        args.max_edges,
+        args.split_protocol,
+        args.epochs,
+    )
+    if args.prepared_dataset_cache is not None:
+        pcache = Path(args.prepared_dataset_cache)
+        if not pcache.is_file():
+            raise SystemExit(f"Prepared dataset cache not found: {pcache}")
+        _LOG.info("phase=data source=prepared_dataset_cache path=%s", pcache)
+        dataset, _ = load_prepared_link_prediction_dataset(
+            pcache,
+            expected_meta=_expected_prepared_cache_meta(args),
+        )
+        graph = dataset.graph
+    else:
+        graph, dataset = build_dataset(args)
+    _LOG.info(
+        "phase=data_done num_train_nodes=%s train_edges=%s",
+        int(dataset.train_data.num_nodes),
+        int(dataset.split.train_pos_edge_index.size(1)),
+    )
+    if args.optuna_trials > 0:
+        if args.method == "node2vec" and args.split_protocol in (
+            "node",
+            "node_category",
+        ):
+            raise SystemExit(
+                "Optuna (--optuna-trials > 0) is not supported for node2vec with "
+                "--split-protocol node or node_category (no validation metrics). "
+                "Use --split-protocol edge or disable Optuna."
+            )
+        from kgml_new.tuning.optuna_runner import require_optuna
+        from kgml_new.tuning.spaces import (
+            apply_param_dict_to_namespace,
+            suggest_run_gpu_method_params,
+        )
+
+        optuna = require_optuna()
+        optuna_seed = int(args.optuna_seed if args.optuna_seed is not None else args.seed)
+        sampler = optuna.samplers.TPESampler(seed=optuna_seed)
+        if args.optuna_storage:
+            study = optuna.create_study(
+                study_name=args.optuna_study or f"kgml_gpu_{args.method}",
+                storage=args.optuna_storage,
+                direction="maximize",
+                sampler=sampler,
+                load_if_exists=True,
+            )
+        else:
+            study = optuna.create_study(direction="maximize", sampler=sampler)
+
+        def _objective(trial: optuna.Trial) -> float:
+            t_args = copy.deepcopy(args)
+            suggest_run_gpu_method_params(trial, t_args)
+            seed_everything(optuna_seed + trial.number * 100_003)
+            out = run_gpu_method_experiment(
+                t_args, device=device, graph=graph, dataset=dataset
+            )
+            vm = out.get("val_metrics")
+            if not vm:
+                return float("-inf")
+            key = "roc_auc" if args.optuna_metric == "val_auc" else "average_precision"
+            v = float(vm.get(key) or 0.0)
+            if v != v:
+                return float("-inf")
+            tm = out.get("test_metrics") or {}
+            trial.set_user_attr("test_roc_auc", tm.get("roc_auc"))
+            trial.set_user_attr("test_average_precision", tm.get("average_precision"))
+            return v
+
+        study.optimize(
+            _objective,
+            n_trials=args.optuna_trials,
+            timeout=args.optuna_timeout,
+        )
+        t_args = copy.deepcopy(args)
+        apply_param_dict_to_namespace(t_args, study.best_params)
+        seed_everything(optuna_seed)
+        output = run_gpu_method_experiment(
+            t_args, device=device, graph=graph, dataset=dataset
+        )
+        output["optuna"] = {
+            "n_trials": len(study.trials),
+            "best_value": study.best_value,
+            "best_params": study.best_params,
+            "metric": args.optuna_metric,
+            "storage": args.optuna_storage,
+            "study_name": getattr(study, "study_name", None),
+        }
+    else:
+        output = run_gpu_method_experiment(
+            args, device=device, graph=graph, dataset=dataset
+        )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     _LOG.info("phase=write_json path=%s", args.output.resolve())
     args.output.write_text(json.dumps(output, indent=2))

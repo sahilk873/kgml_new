@@ -14,7 +14,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
 VENV_PATH=".venv"
-INPUT_CSV="kg.csv"
+INPUT_CSV="data/kg.csv"
 OUTPUT_PKL="data/graph.pkl"
 SOURCE_COL="x_name"
 TARGET_COL="y_name"
@@ -67,7 +67,7 @@ Usage: ./scripts/prepare_data.sh [options]
 
 Options:
   --venv PATH               Virtualenv path. Default: .venv
-  --input-csv PATH          Input CSV. Default: kg.csv
+  --input-csv PATH          Input CSV. Default: data/kg.csv
   --output-pkl PATH         Output pickle. Default: data/graph.pkl
   --source-col NAME         Source node column.
   --target-col NAME         Target node column.

@@ -6,6 +6,7 @@ import types
 
 import networkx as nx
 import pandas as pd
+import pytest
 import torch
 
 from kgml_new.data.datasets import (
@@ -224,6 +225,92 @@ def test_prepare_link_prediction_dataset_node_split_uses_held_out_nodes():
 
     test_src, test_dst = split.test_pos_edge_index
     assert (split.test_node_mask[test_src] | split.test_node_mask[test_dst]).all()
+
+
+def test_prepare_link_prediction_dataset_node_category_split():
+    """Train on edges between non-held types; val/test query edges touch held-out types."""
+    g = nx.Graph()
+    g.add_edge("drug_a", "disease_a", relationship="treats")
+    g.add_edge("drug_b", "disease_b", relationship="treats")
+    g.add_edge("gene_a", "drug_a", relationship="targets")
+    g.add_edge("gene_b", "drug_b", relationship="targets")
+    for node, node_type in {
+        "drug_a": "drug",
+        "drug_b": "drug",
+        "disease_a": "disease",
+        "disease_b": "disease",
+        "gene_a": "gene",
+        "gene_b": "gene",
+    }.items():
+        g.add_node(node, node_type=node_type)
+
+    dataset = prepare_link_prediction_dataset(
+        g,
+        in_dim=16,
+        seed=1,
+        val_ratio=0.3,
+        test_ratio=0.3,
+        split_protocol="node_category",
+        held_out_node_categories=["gene"],
+        negative_sampling_mode="type_matched",
+        negatives_per_pos=2,
+    )
+    assert dataset.split_protocol == "node_category"
+    assert dataset.held_out_node_categories == frozenset({"gene"})
+    split = dataset.split
+    assert split.train_pos_edge_index.numel() > 0
+    assert split.val_pos_edge_index.numel() > 0
+    assert split.test_pos_edge_index.numel() > 0
+
+    src, dst = dataset.positive_edge_index
+    train_edge_mask = split.train_node_mask[src] & split.train_node_mask[dst]
+    val_edge_mask = (~(split.test_node_mask[src] | split.test_node_mask[dst])) & (
+        split.val_node_mask[src] | split.val_node_mask[dst]
+    )
+    test_edge_mask = split.test_node_mask[src] | split.test_node_mask[dst]
+    assert split.train_pos_edge_index.size(1) == int(train_edge_mask.sum())
+    assert split.val_pos_edge_index.size(1) == int(val_edge_mask.sum())
+    assert split.test_pos_edge_index.size(1) == int(test_edge_mask.sum())
+
+    train_src, train_dst = split.train_pos_edge_index
+    assert split.train_node_mask[train_src].all()
+    assert split.train_node_mask[train_dst].all()
+    assert all(dataset.node_types[i] != "gene" for i in train_src.tolist())
+    assert all(dataset.node_types[i] != "gene" for i in train_dst.tolist())
+
+    val_src, val_dst = split.val_pos_edge_index
+    assert (split.val_node_mask[val_src] | split.val_node_mask[val_dst]).all()
+    for s, d in zip(val_src.tolist(), val_dst.tolist(), strict=False):
+        assert dataset.node_types[s] == "gene" or dataset.node_types[d] == "gene"
+
+
+def test_prepare_link_prediction_rejects_combined_relation_and_category_holdout():
+    g = nx.Graph()
+    g.add_edge("a", "b", relationship="rel")
+    g.add_node("a", node_type="t1")
+    g.add_node("b", node_type="t2")
+    with pytest.raises(ValueError, match="Combine only one"):
+        prepare_link_prediction_dataset(
+            g,
+            in_dim=4,
+            split_protocol="node_category",
+            held_out_relations=["rel"],
+            held_out_node_categories=["t2"],
+        )
+
+
+def test_prepare_link_prediction_node_categories_only_with_node_category_protocol():
+    g = nx.Graph()
+    g.add_edge("a", "b", relationship="rel")
+    g.add_node("a", node_type="t1")
+    g.add_node("b", node_type="t2")
+    with pytest.raises(ValueError, match="held_out_node_categories is only supported"):
+        prepare_link_prediction_dataset(
+            g,
+            in_dim=4,
+            split_protocol="node",
+            held_out_node_categories=["t2"],
+        )
 
 
 def test_type_matched_negatives_preserve_destination_type():

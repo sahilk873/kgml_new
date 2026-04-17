@@ -213,9 +213,14 @@ def _score_query_edges(
     edge_label_index: torch.Tensor,
     decoder: str,
     decoder_model: nn.Module | None,
+    rel_decode_bundle: nn.Module | None = None,
+    relation_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     src = edge_label_index[0]
     dst = edge_label_index[1]
+    if rel_decode_bundle is not None and relation_ids is not None:
+        logits = rel_decode_bundle.decode_logits(z, edge_label_index, relation_ids)
+        return torch.sigmoid(logits)
     if decoder == "dot":
         return torch.sigmoid((z[src] * z[dst]).sum(dim=-1))
     if decoder == "mlp":
@@ -274,13 +279,23 @@ def _evaluate_inductive_link_prediction_fullgraph(
     batch_size: int = 64,
     query_buckets: list[str] | None = None,
     return_scores: bool = False,
+    rel_decode_bundle: nn.Module | None = None,
+    query_uv_relation: dict[tuple[int, int], int] | None = None,
 ) -> dict[str, float] | dict[str, object]:
     """
     Same metrics as sampled eval, but one full-graph forward per batch with
     query edges pruned from the adjacency (no pyg-lib / torch-sparse).
     """
+    from kgml_new.training.relation_decode_batch import (
+        build_canonical_uv_relation_lookup,
+        relation_ids_for_query_batch,
+    )
+
     model = model.to(device)
     model.eval()
+    if rel_decode_bundle is not None:
+        rel_decode_bundle = rel_decode_bundle.to(device)
+        rel_decode_bundle.eval()
     if decoder_model is not None:
         decoder_model = decoder_model.to(device)
         decoder_model.eval()
@@ -292,6 +307,11 @@ def _evaluate_inductive_link_prediction_fullgraph(
 
     pos_edge_index = pos_edge_index.cpu().long()
     neg_edge_index = neg_edge_index.cpu().long()
+
+    if rel_decode_bundle is not None and query_uv_relation is None:
+        query_uv_relation = build_canonical_uv_relation_lookup(
+            data.edge_index.cpu(), data.edge_attr.cpu()
+        )
 
     if pos_edge_index.numel() == 0:
         empty: dict[str, float | list | np.ndarray | object] = {
@@ -342,11 +362,24 @@ def _evaluate_inductive_link_prediction_fullgraph(
             else:
                 z = model(x, pruned_edge_index)
             eli = edge_label_index.to(device)
+            rel_kw: dict = {}
+            if rel_decode_bundle is not None and query_uv_relation is not None:
+                rel_kw = {
+                    "rel_decode_bundle": rel_decode_bundle,
+                    "relation_ids": relation_ids_for_query_batch(
+                        batch_pos,
+                        batch_neg,
+                        query_uv_relation,
+                        negatives_per_pos,
+                        device=device,
+                    ),
+                }
             scores = _score_query_edges(
                 z=z,
                 edge_label_index=eli,
                 decoder=decoder,
                 decoder_model=decoder_model,
+                **rel_kw,
             )
 
         pos_count = batch_pos.size(1)
@@ -384,9 +417,16 @@ def evaluate_inductive_link_prediction(
     batch_size: int = 64,
     query_buckets: list[str] | None = None,
     return_scores: bool = False,
+    rel_decode_bundle: nn.Module | None = None,
+    query_uv_relation: dict[tuple[int, int], int] | None = None,
 ) -> dict[str, float] | dict[str, object]:
     from torch_geometric.loader import LinkNeighborLoader
     from torch_geometric.typing import WITH_PYG_LIB, WITH_TORCH_SPARSE
+
+    from kgml_new.training.relation_decode_batch import (
+        build_canonical_uv_relation_lookup,
+        relation_ids_for_query_batch,
+    )
 
     if not WITH_PYG_LIB and not WITH_TORCH_SPARSE:
         _LOG.warning(
@@ -406,16 +446,26 @@ def evaluate_inductive_link_prediction(
             batch_size=batch_size,
             query_buckets=query_buckets,
             return_scores=return_scores,
+            rel_decode_bundle=rel_decode_bundle,
+            query_uv_relation=query_uv_relation,
         )
 
     model = model.to(device)
     model.eval()
+    if rel_decode_bundle is not None:
+        rel_decode_bundle = rel_decode_bundle.to(device)
+        rel_decode_bundle.eval()
     if decoder_model is not None:
         decoder_model = decoder_model.to(device)
         decoder_model.eval()
 
     pos_edge_index = pos_edge_index.cpu().long()
     neg_edge_index = neg_edge_index.cpu().long()
+
+    if rel_decode_bundle is not None and query_uv_relation is None:
+        query_uv_relation = build_canonical_uv_relation_lookup(
+            data.edge_index.cpu(), data.edge_attr.cpu()
+        )
 
     if pos_edge_index.numel() == 0:
         empty: dict[str, float | list | np.ndarray | object] = {
@@ -468,11 +518,25 @@ def evaluate_inductive_link_prediction(
                 z = model(batch.x, pruned_edge_index, pruned_edge_attr)
             else:
                 z = model(batch.x, pruned_edge_index)
+            rel_kw: dict = {}
+            if rel_decode_bundle is not None and query_uv_relation is not None:
+                rel_ids = relation_ids_for_query_batch(
+                    batch_pos.to(device),
+                    batch_neg.to(device),
+                    query_uv_relation,
+                    negatives_per_pos,
+                    device=device,
+                )
+                rel_kw = {
+                    "rel_decode_bundle": rel_decode_bundle,
+                    "relation_ids": rel_ids,
+                }
             scores = _score_query_edges(
                 z=z,
                 edge_label_index=batch.edge_label_index,
                 decoder=decoder,
                 decoder_model=decoder_model,
+                **rel_kw,
             )
 
         pos_count = batch_pos.size(1)

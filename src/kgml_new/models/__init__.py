@@ -10,6 +10,7 @@ from kgml_new.models.edge_aware_sage import (
 from kgml_new.models.lightweight_node2vec import Node2VecEmbedding
 from kgml_new.models.link_mlp import LinkPredictionMLP
 from kgml_new.models.node_classifier import NodeClassificationMLP
+from kgml_new.models.hgt import HGTLinkPredictor
 from kgml_new.models.txgnn import TxGNN
 
 __all__ = [
@@ -18,6 +19,7 @@ __all__ = [
     "build_edge_aware_model",
     "EDGE_RELATION_MODES",
     "EdgeAwareGraphSAGE",
+    "HGTLinkPredictor",
     "LinkPredictionMLP",
     "NodeClassificationMLP",
     "Node2VecEmbedding",

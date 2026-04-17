@@ -16,6 +16,7 @@ from kgml_new.training.splits import (
     build_train_graph_data,
     create_edge_split,
     create_edge_split_relation_holdout,
+    create_node_category_split,
     create_node_split,
     create_node_split_relation_holdout,
 )
@@ -43,6 +44,7 @@ class LinkPredictionDataset:
     train_pos_edge_attr: torch.Tensor | None
     held_out_relations: frozenset[str] | None = None
     held_out_relation_ids: frozenset[int] | None = None
+    held_out_node_categories: frozenset[str] | None = None
 
 
 def _shuffle_graph_relations(
@@ -279,6 +281,7 @@ def prepare_link_prediction_dataset(
     shuffle_relations: bool = False,
     add_self_loops: bool = False,
     held_out_relations: list[str] | None = None,
+    held_out_node_categories: list[str] | None = None,
 ) -> LinkPredictionDataset:
     working_graph = (
         _shuffle_graph_relations(graph, seed=seed)
@@ -300,7 +303,25 @@ def prepare_link_prediction_dataset(
         for node in node_list
     ]
     if negative_sampling_mode is None:
-        negative_sampling_mode = "type_matched" if split_protocol == "node" else "global"
+        negative_sampling_mode = (
+            "type_matched"
+            if split_protocol in ("node", "node_category")
+            else "global"
+        )
+
+    ho_cat = (
+        frozenset(str(x).strip() for x in held_out_node_categories if str(x).strip())
+        if held_out_node_categories
+        else frozenset()
+    )
+    if ho_cat and split_protocol != "node_category":
+        raise ValueError(
+            "held_out_node_categories is only supported with split_protocol=node_category"
+        )
+    if split_protocol == "node_category" and not ho_cat:
+        raise ValueError(
+            "split_protocol=node_category requires a non-empty held_out_node_categories list"
+        )
 
     held_ids: frozenset[int] | None = None
     held_names: frozenset[str] | None = None
@@ -321,6 +342,11 @@ def prepare_link_prediction_dataset(
             )
         held_ids = hid
         held_names = frozenset(resolved)
+
+    if held_ids is not None and ho_cat:
+        raise ValueError(
+            "Combine only one of held_out_relations and held_out_node_categories, not both."
+        )
 
     if held_ids is not None:
         if split_protocol == "edge":
@@ -377,6 +403,19 @@ def prepare_link_prediction_dataset(
             negative_sampling_mode=negative_sampling_mode,
             negatives_per_pos=negatives_per_pos,
         )
+    elif split_protocol == "node_category":
+        split = create_node_category_split(
+            positive_edge_index,
+            node_types=node_types,
+            held_out_node_categories=ho_cat,
+            num_src_nodes=int(data.num_nodes),
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed,
+            undirected=True,
+            negative_sampling_mode=negative_sampling_mode,
+            negatives_per_pos=negatives_per_pos,
+        )
     else:
         raise ValueError(f"Unsupported split_protocol: {split_protocol}")
     train_pos_edge_attr = _select_train_edge_attr(
@@ -408,6 +447,7 @@ def prepare_link_prediction_dataset(
         train_pos_edge_attr=train_pos_edge_attr,
         held_out_relations=held_names,
         held_out_relation_ids=held_ids,
+        held_out_node_categories=ho_cat if ho_cat else None,
     )
 
 

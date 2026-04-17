@@ -16,7 +16,7 @@ export PYTHONPATH=src
 
 .venv_legacy_gpu/bin/python -m kgml_new.scripts.run_gpu_method \
   --method edge_aware_sage \
-  --csv kg.csv \
+  --csv data/kg.csv \
   --device cuda \
   --batch-size 128 \
   --semantic \

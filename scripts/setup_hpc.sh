@@ -13,7 +13,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
 VENV_PATH=".venv"
-DATASET_PATH="kg.csv"
+DATASET_PATH="data/kg.csv"
 DATASET_URL="https://dataverse.harvard.edu/api/access/datafile/6180620"
 INSTALL_SEMANTIC="ask"
 INSTALL_DEV="yes"
@@ -50,7 +50,7 @@ Usage: ./scripts/setup_hpc.sh [options]
 
 Options:
   --venv PATH            Virtualenv path. Default: .venv
-  --dataset-path PATH    Local CSV path to ensure exists. Default: kg.csv
+  --dataset-path PATH    Local CSV path to ensure exists. Default: data/kg.csv
   --dataset-url URL      Optional URL to download the CSV if missing.
   --with-semantic        Install semantic extras without prompting.
   --without-semantic     Skip semantic extras without prompting.

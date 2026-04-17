@@ -79,6 +79,9 @@ def build_cache_meta(
     if getattr(dataset, "held_out_relation_ids", None):
         meta["held_out_relations"] = sorted(dataset.held_out_relations or [])
         meta["held_out_relation_ids"] = sorted(dataset.held_out_relation_ids)
+    hoc = getattr(dataset, "held_out_node_categories", None)
+    if hoc:
+        meta["held_out_node_categories"] = sorted(hoc)
     return meta
 
 

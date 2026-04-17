@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import json
 from pathlib import Path
 
 import torch
 
-from kgml_new.config import LinkMLPConfig, TrainConfig
+from kgml_new.config import (
+    link_mlp_config_from_run_gpu_method_args,
+    train_config_from_link_prediction_args,
+)
 from kgml_new.data.datasets import (
     compute_relation_diversity_buckets,
     prepare_link_prediction_dataset,
@@ -25,7 +30,7 @@ from kgml_new.training.link_unsupervised import (
 from kgml_new.training.train_link_mlp import train_link_mlp_with_validation
 
 
-def main() -> None:
+def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Unsupervised GraphSAGE / edge-aware semantic GraphSAGE link prediction"
     )
@@ -88,15 +93,36 @@ def main() -> None:
     )
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--learning-rate", type=float, default=None)
+    p.add_argument("--train-batch-size", type=int, default=None)
+    p.add_argument("--dropout", type=float, default=None)
+    p.add_argument("--num-layers", type=int, default=None)
+    p.add_argument("--hidden-dim", type=int, default=None)
+    p.add_argument("--edge-dim", type=int, default=None)
+    p.add_argument("--num-neighbors-spec", type=str, default=None)
+    p.add_argument("--link-mlp-learning-rate", type=float, default=None)
+    p.add_argument("--link-mlp-dropout", type=float, default=None)
+    p.add_argument("--link-mlp-batch-size", type=int, default=None)
+    p.add_argument("--link-mlp-hidden-dims", type=str, default=None)
     p.add_argument(
         "--out", type=Path, default=None, help="Save node embeddings .pt path"
     )
-    args = p.parse_args()
-
-    torch.manual_seed(args.seed)
-    cfg = TrainConfig(
-        epochs=args.epochs, seed=args.seed, neighbor_aggr=args.neighbor_aggr
+    p.add_argument("--optuna-trials", type=int, default=0)
+    p.add_argument(
+        "--optuna-metric",
+        choices=("val_auc", "val_ap"),
+        default="val_auc",
     )
+    p.add_argument("--optuna-storage", type=str, default=None)
+    p.add_argument("--optuna-study", type=str, default=None)
+    p.add_argument("--optuna-seed", type=int, default=None)
+    p.add_argument("--optuna-timeout", type=float, default=None)
+    return p.parse_args()
+
+
+def run_link_prediction_experiment(args: argparse.Namespace) -> dict:
+    torch.manual_seed(args.seed)
+    cfg = train_config_from_link_prediction_args(args)
 
     g = load_pickled_graph(args.graph)
     dataset = prepare_link_prediction_dataset(
@@ -111,11 +137,6 @@ def main() -> None:
         decoder=args.decoder,
         shuffle_relations=args.shuffle_relations,
     )
-    print(f"split protocol: {args.split_protocol}")
-    print(f"negative sampling mode: {dataset.negative_sampling_mode}")
-    print(f"decoder: {args.decoder}")
-    print(f"shuffle relations: {dataset.shuffle_relations}")
-    print(f"edge relation mode: {args.edge_relation_mode}")
     relation_lookup = dataset.relation_lookup
     split = dataset.split
     train_pos = split.train_pos_edge_index
@@ -189,16 +210,12 @@ def main() -> None:
         decoder_model, _, _ = train_link_mlp_with_validation(
             z.detach(),
             train_pos,
-            config=LinkMLPConfig(
-                epochs=args.epochs,
-                seed=args.seed,
-                feature_mode="concat_product",
-            ),
+            config=link_mlp_config_from_run_gpu_method_args(args),
             device=device,
         )
 
-    print(f"Embeddings shape: {tuple(z.shape)}")
-
+    val_metrics = None
+    test_metrics = None
     if split.val_pos_edge_index.numel() > 0:
         val_metrics = evaluate_inductive_link_prediction(
             model,
@@ -213,7 +230,6 @@ def main() -> None:
             decoder_model=decoder_model,
             query_buckets=val_query_buckets,
         )
-        print("validation metrics:", val_metrics)
     if split.test_pos_edge_index.numel() > 0:
         test_metrics = evaluate_inductive_link_prediction(
             model,
@@ -228,14 +244,91 @@ def main() -> None:
             decoder_model=decoder_model,
             query_buckets=test_query_buckets,
         )
-        print("test metrics:", test_metrics)
 
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {"embeddings": z.cpu(), "relation_lookup": relation_lookup}, args.out
         )
-        print(f"Saved {args.out}")
+
+    return {
+        "split_protocol": args.split_protocol,
+        "negative_sampling_mode": dataset.negative_sampling_mode,
+        "decoder": args.decoder,
+        "edge_relation_mode": args.edge_relation_mode,
+        "val_metrics": val_metrics,
+        "test_metrics": test_metrics,
+        "embedding_shape": list(z.shape),
+        "saved_embeddings": str(args.out) if args.out else None,
+    }
+
+
+def main() -> None:
+    args = parse_args()
+
+    if args.optuna_trials > 0:
+        from kgml_new.tuning.optuna_runner import require_optuna
+        from kgml_new.tuning.spaces import (
+            apply_param_dict_to_namespace,
+            suggest_link_prediction_legacy_params,
+        )
+
+        optuna = require_optuna()
+        optuna_seed = int(args.optuna_seed if args.optuna_seed is not None else args.seed)
+        sampler = optuna.samplers.TPESampler(seed=optuna_seed)
+        if args.optuna_storage:
+            study = optuna.create_study(
+                study_name=args.optuna_study or f"kgml_link_pred_{args.model}",
+                storage=args.optuna_storage,
+                direction="maximize",
+                sampler=sampler,
+                load_if_exists=True,
+            )
+        else:
+            study = optuna.create_study(direction="maximize", sampler=sampler)
+
+        def _objective(trial: optuna.Trial) -> float:
+            t_args = copy.deepcopy(args)
+            suggest_link_prediction_legacy_params(trial, t_args)
+            torch.manual_seed(optuna_seed + trial.number * 100_003)
+            out = run_link_prediction_experiment(t_args)
+            vm = out.get("val_metrics")
+            if not vm:
+                return float("-inf")
+            key = "roc_auc" if args.optuna_metric == "val_auc" else "average_precision"
+            v = float(vm.get(key) or 0.0)
+            return v if v == v else float("-inf")
+
+        study.optimize(
+            _objective,
+            n_trials=args.optuna_trials,
+            timeout=args.optuna_timeout,
+        )
+        t_args = copy.deepcopy(args)
+        apply_param_dict_to_namespace(t_args, study.best_params)
+        torch.manual_seed(args.seed)
+        summary = run_link_prediction_experiment(t_args)
+        summary["optuna"] = {
+            "n_trials": len(study.trials),
+            "best_value": study.best_value,
+            "best_params": study.best_params,
+            "metric": args.optuna_metric,
+        }
+        print(json.dumps(summary, indent=2, default=str))
+        return
+
+    out = run_link_prediction_experiment(args)
+    print(f"split protocol: {args.split_protocol}")
+    print(f"negative sampling mode: {out['negative_sampling_mode']}")
+    print(f"decoder: {args.decoder}")
+    print(f"edge relation mode: {args.edge_relation_mode}")
+    print(f"Embeddings shape: {tuple(out['embedding_shape'])}")
+    if out.get("val_metrics"):
+        print("validation metrics:", out["val_metrics"])
+    if out.get("test_metrics"):
+        print("test metrics:", out["test_metrics"])
+    if out.get("saved_embeddings"):
+        print(f"Saved {out['saved_embeddings']}")
 
 
 if __name__ == "__main__":

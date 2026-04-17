@@ -109,13 +109,13 @@ def _primekg_node_classification_graph() -> nx.Graph:
     """
     Build a small PrimeKG subgraph with multiple node types.
 
-    The first rows in kg.csv are mostly gene/protein edges, so we intentionally
+    The first rows in data/kg.csv are mostly gene/protein edges, so we intentionally
     sample from the later mixed-type region to exercise node classification on
     a more representative PrimeKG slice.
     """
-    kg_path = Path(__file__).parent.parent / "kg.csv"
+    kg_path = Path(__file__).parent.parent / "data/kg.csv"
     if not kg_path.exists():
-        pytest.skip("PrimeKG CSV not found at kg.csv")
+        pytest.skip("PrimeKG CSV not found at data/kg.csv")
 
     selected = None
     for chunk_idx, chunk in enumerate(

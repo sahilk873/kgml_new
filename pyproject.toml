@@ -15,16 +15,20 @@ dependencies = [
     "torch>=2.0",
     "torch-geometric>=2.4",
     "pandas>=2.0",
+    "huggingface-hub>=0.23",
 ]
 
 [project.optional-dependencies]
-semantic = ["openai>=1.0", "python-dotenv>=1.0"]
-dev = ["pytest>=7.0"]
+semantic = ["openai>=1.0", "google-genai>=1.0.0", "python-dotenv>=1.0"]
+tuning = ["optuna>=3.0"]
+dev = ["pytest>=7.0", "optuna>=3.0"]
 
 [project.scripts]
 kgml-new-link-pred = "kgml_new.scripts.run_link_prediction:main"
 kgml-new-node-cls = "kgml_new.scripts.run_node_classification:main"
 kgml-new-txgnn = "kgml_new.scripts.run_txgnn:main"
+kgml-new-hgt = "kgml_new.scripts.run_hgt:main"
+kgml-new-build-node-caches = "kgml_new.scripts.build_node_embedding_caches:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

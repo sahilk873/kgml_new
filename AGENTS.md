@@ -4,7 +4,7 @@ This file is the operating guide for agents working in `kgml_new`. It is intende
 
 ## Repo Purpose
 
-`kgml_new` is a standalone PyTorch Geometric implementation for knowledge-graph experiments. The main focus is link prediction, with additional support for node classification and a TxGNN-style heterogeneous model.
+`kgml_new` is a standalone PyTorch Geometric implementation for knowledge-graph experiments. The main focus is link prediction, with additional support for node classification and typed heterogeneous baselines (TxGNN-style encoder and a standalone HGT link predictor).
 
 The primary model families in this repository are:
 
@@ -15,6 +15,7 @@ The primary model families in this repository are:
 - Link MLP on top of learned node embeddings
 - Edge-aware Link MLP
 - TxGNN-style heterogeneous GNN
+- HGT (Heterogeneous Graph Transformer; PyG `HGTConv`) as a separate typed link-prediction baseline
 
 The repo is intended to work with:
 
@@ -31,10 +32,13 @@ When in doubt, trust these files first (paths are relative to the repository roo
 - [EXPERIMENTS.md](EXPERIMENTS.md)
 - [src/kgml_new/scripts/run_gpu_method.py](src/kgml_new/scripts/run_gpu_method.py)
 - [src/kgml_new/scripts/run_txgnn.py](src/kgml_new/scripts/run_txgnn.py)
+- [src/kgml_new/scripts/run_hgt.py](src/kgml_new/scripts/run_hgt.py)
 - [src/kgml_new/scripts/run_link_prediction.py](src/kgml_new/scripts/run_link_prediction.py)
 - [src/kgml_new/scripts/run_node_classification.py](src/kgml_new/scripts/run_node_classification.py)
 - [src/kgml_new/scripts/generate_relation_embeddings.py](src/kgml_new/scripts/generate_relation_embeddings.py)
+- [src/kgml_new/scripts/build_node_embedding_caches.py](src/kgml_new/scripts/build_node_embedding_caches.py)
 - [src/kgml_new/scripts/convert_hetionet.py](src/kgml_new/scripts/convert_hetionet.py)
+- [src/kgml_new/scripts/download_fb15k237.py](src/kgml_new/scripts/download_fb15k237.py)
 - [src/kgml_new/embeddings/semantic.py](src/kgml_new/embeddings/semantic.py)
 - [src/kgml_new/config.py](src/kgml_new/config.py)
 - [src/kgml_new/data/loaders.py](src/kgml_new/data/loaders.py)
@@ -81,10 +85,10 @@ If semantic relation embeddings are used, `OPENAI_API_KEY` must be present. The 
 
 Important files and directories in this repo:
 
-- [kg.csv](kg.csv): PrimeKG-style CSV
+- [data/kg.csv](data/kg.csv): PrimeKG-style CSV
 - [drkg.tsv](drkg.tsv): DRKG edge list TSV
 - [relation_glossary.tsv](relation_glossary.tsv): glossary used for DRKG-style sourced predicates
-- [cache](cache): relation embedding caches
+- [cache](cache): relation and node embedding caches
 - [results](results): experiment outputs if created
 - [results/ood](results/ood): optional OOD difficulty CSV exports and multi-run aggregates (created when using those flags)
 - [scripts/slurm](scripts/slurm): SLURM launch scripts
@@ -120,7 +124,7 @@ Canonical examples:
 ```bash
 .venv/bin/python -m kgml_new.scripts.run_gpu_method \
   --method baseline_sage \
-  --input kg.csv \
+  --input data/kg.csv \
   --split-protocol node \
   --epochs 200 \
   --output results/baseline_sage-node.json
@@ -157,7 +161,7 @@ source .venv/bin/activate
 cd /path/to/kgml_new   # repository root
 PYTHONPATH=src python -m kgml_new.scripts.run_gpu_method \
   --method baseline_sage \
-  --input kg.csv \
+  --input data/kg.csv \
   --split-protocol node \
   --output results/run.json \
   --compute-ood-difficulty \
@@ -208,11 +212,31 @@ Example:
 
 ```bash
 .venv/bin/python -m kgml_new.scripts.run_txgnn \
-  --input kg.csv \
+  --input data/kg.csv \
   --relation indication \
   --epochs 20 \
   --output results/txgnn.json
 ```
+
+### 2b. `run_hgt`
+
+Standalone heterogeneous link prediction using the Heterogeneous Graph Transformer (Hu et al., WWW 2020; PyG `HGTConv`). Same CSV/pickle inputs and relation split behavior as `run_txgnn`, but a different encoder and training module (`models/hgt.py`, `training/hgt_train.py`). No TxGNN disease-prototype augmentation.
+
+- [src/kgml_new/scripts/run_hgt.py](src/kgml_new/scripts/run_hgt.py)
+
+Example:
+
+```bash
+.venv/bin/python -m kgml_new.scripts.run_hgt \
+  --input data/kg.csv \
+  --relation indication \
+  --num-heads 4 \
+  --num-layers 2 \
+  --epochs 20 \
+  --output results/hgt.json
+```
+
+Console entry point: `kgml-new-hgt` (see [pyproject.toml](pyproject.toml)).
 
 ### 3. `run_link_prediction`
 
@@ -234,13 +258,13 @@ For `edge_sage`, node classification now shares the same semantic/random/cache r
 
 ### 5. `generate_relation_embeddings`
 
-Precompute relation embedding caches (OpenAI, SapBERT, or random):
+Precompute relation embedding caches (OpenAI, Gemini, E5, SapBERT, or random; CLI default `--embedding-model` is **openai**):
 
 - [src/kgml_new/scripts/generate_relation_embeddings.py](src/kgml_new/scripts/generate_relation_embeddings.py)
 
 This is important for reproducible edge-aware runs and for avoiding repeated API calls.
 
-**This script does not take `--semantic`.** Choose the backend with `--embedding-model {openai,sapbert,random}` (see `--help`). OpenAI requires `[semantic]` extras and `OPENAI_API_KEY`.
+**This script does not take `--semantic`.** Choose the backend with `--embedding-model {openai,gemini,sapbert,e5,random}` (see `--help`). OpenAI requires `[semantic]` extras and `OPENAI_API_KEY`; Gemini requires `GEMINI_API_KEY`.
 
 Example (OpenAI):
 
@@ -261,6 +285,29 @@ Example (random baseline cache):
   --edge-dim 32
 ```
 
+### 5b. `build_node_embedding_caches`
+
+Precompute reusable node embedding caches for DRKG, PrimeKG `kg.csv`, and FB15k-237 across OpenAI, E5, and Gemini:
+
+- [src/kgml_new/scripts/build_node_embedding_caches.py](src/kgml_new/scripts/build_node_embedding_caches.py)
+
+Example:
+
+```bash
+.venv/bin/python -m kgml_new.scripts.build_node_embedding_caches \
+  --output-dir cache \
+  --datasets drkg primekg fb15k237 \
+  --embedding-models openai e5 gemini
+```
+
+This script writes `.pt` payloads with:
+
+- `embeddings` tensor (`[num_nodes, dim]`)
+- `node_ids`, `node_types`, `node_texts`
+- metadata (`dataset`, `embedding_model`, `embedding_dim`, `num_nodes`)
+
+The output is directly consumable by `run_gpu_method --node-embeddings-path ...` (it auto-resolves the `embeddings` tensor key).
+
 ### 6. `convert_hetionet`
 
 Hetionet data (`hetionet-v1.0.json.bz2`) is not directly consumable by `run_gpu_method`; convert it first:
@@ -277,6 +324,27 @@ Example:
 ```
 
 The TSV output is headerless and follows DRKG ordering (`source relation target`), so `run_gpu_method --input data/hetionet.tsv` works with the existing CSV/TSV loader path. By default, non-`both` direction values are appended to relation labels to avoid collapsing directional semantics in undirected graph training.
+
+### 7. `download_fb15k237`
+
+Download FB15k-237 from Hugging Face and export a `kgml_new`-compatible headerless TSV edge list:
+
+- [src/kgml_new/scripts/download_fb15k237.py](src/kgml_new/scripts/download_fb15k237.py)
+
+Example:
+
+```bash
+.venv/bin/python -m kgml_new.scripts.download_fb15k237 \
+  --output-tsv data/fb15k-237/fb15k-237.tsv
+```
+
+This script:
+
+1. downloads dataset files from Hugging Face (`repo_id` default: `KGraph/FB15k-237`)
+2. locates `train`, `valid`, and `test` split files
+3. normalizes triples into `source relation target` TSV lines
+4. writes merged TSV for `run_gpu_method`
+5. writes a metadata JSON with split file paths and counts
 
 ## Input Formats And How Loading Works
 
@@ -402,7 +470,7 @@ Supported link scoring decoders:
 
 - relation-aware GraphSAGE
 - per-edge message uses relation information
-- supports OpenAI, SapBERT, or random relation tables via `--embedding-model` (with `--semantic` / `--no-semantic` controlling defaults)
+- supports OpenAI, Gemini, E5, SapBERT, or random relation tables via `--embedding-model` (with `--semantic` / `--no-semantic` controlling defaults; with `--semantic` and no `--embedding-model`, the resolved backend is **OpenAI**)
 - optional `--semantic-alignment-lambda` regularizer when using `basis_mixture` with semantic embeddings (builds a similarity matrix from relation text; see `run_gpu_method.py`)
 
 ### `node2vec`
@@ -425,13 +493,19 @@ Supported link scoring decoders:
 - typed heterogeneous GNN
 - relation-aware heterogeneous model with a DistMult-style decoding path and prototype augmentation
 
+### `hgt`
+
+- typed heterogeneous baseline via PyG `HGTConv` (multi-head attention over metapath-aware messages)
+- DistMult-style decoding; trained through `run_hgt` / `kgml-new-hgt`
+- hidden and output widths are rounded down so channel size is divisible by `num_heads` (required by `HGTConv`)
+
 ## Semantic Relation Embeddings
 
 Semantic logic lives in [src/kgml_new/embeddings/semantic.py](src/kgml_new/embeddings/semantic.py).
 
 ### Python API contract (do not regress)
 
-These entry points take **`embedding_model`** (`"openai"`, `"sapbert"`, or `"random"`) and **`strict_embedding`**, not legacy `use_openai` / `strict_openai`:
+These entry points take **`embedding_model`** (`"openai"`, `"gemini"`, `"e5"`, `"sapbert"`, or `"random"`) and **`strict_embedding`**, not legacy `use_openai` / `strict_openai`:
 
 - `relation_embeddings_from_graph`
 - `relation_embeddings_from_relation_types`
@@ -467,7 +541,7 @@ For PrimeKG-style labels such as `drug_protein`, there is no DRKG glossary match
 Caches written by `relation_embeddings_from_relation_types` / `relation_embeddings_from_graph` include (among others):
 
 - `format_version` (current writes use version **4**)
-- `embedding_model` (`openai`, `sapbert`, or `random`)
+- `embedding_model` (`openai`, `gemini`, `e5`, `sapbert`, or `random`)
 - `relation_text_mode` (`raw` or `canonical`)
 - `sapbert_model` (when applicable)
 - `use_openai` (boolean mirror of `embedding_model == "openai"`, for older readers)
@@ -563,7 +637,7 @@ Defaults live in [src/kgml_new/config.py](src/kgml_new/config.py).
 
 ## Datasets In This Repo
 
-### `kg.csv`
+### `data/kg.csv`
 
 PrimeKG-style CSV. Use this for PrimeKG experiments and typed-node experiments that fit the PrimeKG schema.
 
@@ -657,7 +731,7 @@ This is a much more meaningful semantic-vs-random comparison than the original s
 ```bash
 .venv/bin/python -m kgml_new.scripts.run_gpu_method \
   --method baseline_sage \
-  --input kg.csv \
+  --input data/kg.csv \
   --split-protocol node \
   --epochs 200 \
   --output results/primekg-baseline-sage-node.json
@@ -668,7 +742,7 @@ This is a much more meaningful semantic-vs-random comparison than the original s
 ```bash
 .venv/bin/python -m kgml_new.scripts.run_gpu_method \
   --method edge_aware_sage \
-  --input kg.csv \
+  --input data/kg.csv \
   --split-protocol node \
   --semantic \
   --semantic-cache cache/primekg-relations.pt \
@@ -730,7 +804,7 @@ This is a much more meaningful semantic-vs-random comparison than the original s
 
 ```bash
 .venv/bin/python -m kgml_new.scripts.run_txgnn \
-  --input kg.csv \
+  --input data/kg.csv \
   --relation indication \
   --epochs 20 \
   --output results/txgnn.json
@@ -763,13 +837,13 @@ For `run_gpu_method`, the most important flags are:
 - `--relation-col`
 - `--source-type-col`
 - `--target-type-col`
-- `--split-protocol {node,edge}`
+- `--split-protocol {node,node_category,edge}`
 - `--negative-sampling-mode {global,type_matched}`
 - `--negatives-per-pos`
 - `--decoder {dot,mlp}`
 - `--shuffle-relations`
 - `--semantic` or `--no-semantic`
-- `--embedding-model {openai,sapbert,random}`
+- `--embedding-model {openai,gemini,sapbert,e5,random}`
 - `--semantic-cache`
 - `--glossary-path`
 - `--sapbert-model`

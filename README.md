@@ -10,6 +10,7 @@ Standalone **PyTorch Geometric** implementation of:
 - **BaselineGCN** for comparison
 - **Node2Vec** embeddings
 - **TxGNN-style hetero model**: relation-aware heterogeneous GNN + DistMult decoder + disease prototype augmentation
+- **HGT** (standalone typed baseline): PyG `HGTConv` stack + DistMult decoder via `run_hgt` / `kgml-new-hgt`
 
 GraphSAGE training defaults to mini-batch neighbor sampling via `LinkNeighborLoader`, with loader-level negative edge sampling for link prediction. For link prediction, the default evaluation now uses a node-disjoint split so held-out entities are unseen during training edges, which makes the benchmark closer to OOD generalization. Full-graph training remains available as an explicit fallback path.
 
@@ -25,7 +26,7 @@ pip install -e ".[dev]"           # core + pytest
 pip install -e ".[semantic]"        # optional: OpenAI relation embeddings
 ```
 
-Set `OPENAI_API_KEY` when using OpenAI relation embeddings (`run_gpu_method --semantic`, or `generate_relation_embeddings --embedding-model openai`).
+With `--semantic` and no `--embedding-model`, `run_gpu_method` resolves relation embeddings to **OpenAI** (`text-embedding-3-small`); set `OPENAI_API_KEY` (and `pip install -e ".[semantic]"`). Use `--embedding-model gemini` and `GEMINI_API_KEY` for Gemini caches or live embedding (`--gemini-model` defaults to `gemini-3.1-flash-lite-preview`).
 For HPC or fresh cluster installs, prefer `./scripts/setup_hpc.sh` because it also installs the matching PyTorch Geometric backends.
 
 Semantic relation embeddings now use `relation_glossary.tsv` for DRKG-style sourced predicates and fall back to the raw relation string otherwise. PrimeKG-style labels remain raw-string prompts unless a separate PrimeKG glossary is added.
@@ -35,18 +36,21 @@ Semantic relation embeddings now use `relation_glossary.tsv` for DRKG-style sour
 ```bash
 python -m kgml_new.scripts.run_link_prediction --graph /path/to/graph.pkl --model sage --epochs 20 --out emb.pt
 python -m kgml_new.scripts.run_link_prediction --graph /path/to/graph.pkl --model edge_sage --edge-relation-mode gated --no-semantic --epochs 20
-python -m kgml_new.scripts.run_gpu_method --method baseline_sage --input kg.csv --source-col x_name --target-col y_name --relation-col relation --epochs 3 --output results.json
+python -m kgml_new.scripts.run_gpu_method --method baseline_sage --input data/kg.csv --source-col x_name --target-col y_name --relation-col relation --epochs 3 --output results.json
 python -m kgml_new.scripts.run_gpu_method --method edge_aware_sage --input drkg.tsv --semantic --semantic-cache cache/drkg-relations.pt --edge-relation-mode concat --epochs 20 --output drkg-edge-aware.json
 python -m kgml_new.scripts.run_gpu_method --method edge_aware_sage --input drkg.tsv --semantic --semantic-cache cache/drkg-relations.pt --edge-relation-mode gated --epochs 20 --output drkg-edge-aware-gated.json
 python -m kgml_new.scripts.run_gpu_method --method edge_aware_sage --input drkg.tsv --semantic --semantic-cache cache/drkg-relations.pt --edge-relation-mode basis_mixture --num-relation-bases 4 --epochs 20 --output drkg-edge-aware-basis.json
-python -m kgml_new.scripts.run_gpu_method --method baseline_sage --input kg.csv --output results.json --compute-ood-difficulty --save-edge-predictions   # stratified OOD metrics + optional CSV under results/ood/
-python -m kgml_new.scripts.generate_relation_embeddings --input drkg.tsv --output cache/drkg-relations.pt --embedding-model openai
-python -m kgml_new.scripts.run_txgnn --input kg.csv --source-col x_name --target-col y_name --relation-col relation --relation indication --epochs 20 --output txgnn.json
+python -m kgml_new.scripts.run_gpu_method --method baseline_sage --input data/kg.csv --output results.json --compute-ood-difficulty --save-edge-predictions   # stratified OOD metrics + optional CSV under results/ood/
+python -m kgml_new.scripts.generate_relation_embeddings --input drkg.tsv --output cache/drkg-relations.pt --embedding-model gemini --gemini-model gemini-3.1-flash-lite-preview
+python -m kgml_new.scripts.build_node_embedding_caches --output-dir cache --datasets drkg primekg fb15k237 --embedding-models openai e5 gemini
+python -m kgml_new.scripts.run_txgnn --input data/kg.csv --source-col x_name --target-col y_name --relation-col relation --relation indication --epochs 20 --output txgnn.json
+python -m kgml_new.scripts.run_hgt --input data/kg.csv --source-col x_name --target-col y_name --relation-col relation --relation indication --epochs 20 --num-heads 4 --output hgt.json
 python -m kgml_new.scripts.run_node_classification --graph /path/to/graph.pkl --method edge_sage --semantic --semantic-cache cache/relations.pt --edge-relation-mode basis_mixture --num-relation-bases 4 --out node-cls.json
 python -m kgml_new.scripts.convert_hetionet --input hetionet-v1.0.json.bz2 --output-tsv data/hetionet.tsv --output-pickle data/hetionet.pkl
+python -m kgml_new.scripts.download_fb15k237 --output-tsv data/fb15k-237/fb15k-237.tsv
 ```
 
-`run_gpu_method` and `run_txgnn` now accept either generic CSV input or a pickled NetworkX graph via `--input-format {auto,csv,pickle}`. For non-PrimeKG CSVs, point `--source-col`, `--target-col`, `--relation-col`, and optional type columns at the right schema instead of changing code.
+`run_gpu_method`, `run_txgnn`, and `run_hgt` now accept either generic CSV input or a pickled NetworkX graph via `--input-format {auto,csv,pickle}`. For non-PrimeKG CSVs, point `--source-col`, `--target-col`, `--relation-col`, and optional type columns at the right schema instead of changing code.
 For full experiment instructions, including the node-disjoint protocol, DRKG support, TxGNN runs, and CLI options, see `EXPERIMENTS.md`.
 
 ## Hetionet Integration
@@ -84,6 +88,28 @@ python -m kgml_new.scripts.run_gpu_method \
 ```
 
 By default, `convert_hetionet` appends direction tags for non-`both` edges (for example `upregulates::forward`) so directional semantics are not lost when training on undirected graph structures.
+
+## FB15k-237 via Hugging Face
+
+Download and normalize FB15k-237 into the same headerless TSV format used for DRKG-style runs:
+
+```bash
+python -m kgml_new.scripts.download_fb15k237 \
+  --output-tsv data/fb15k-237/fb15k-237.tsv
+```
+
+The script downloads split files from Hugging Face (`train`, `valid`, `test`), combines them into one TSV (`source relation target`), and writes metadata to `data/fb15k-237/metadata.json`.
+
+Then run any standard method:
+
+```bash
+python -m kgml_new.scripts.run_gpu_method \
+  --method baseline_sage \
+  --input data/fb15k-237/fb15k-237.tsv \
+  --split-protocol node \
+  --epochs 20 \
+  --output results/fb15k237-baseline-sage.json
+```
 
 ## Edge Relation Modes
 
@@ -125,6 +151,25 @@ For DRKG-style sourced predicates, `relation_glossary.tsv` supplies the `Data-so
 Legacy semantic caches saved before the full-width change are automatically regenerated when reused.
 
 If you already have a full DRKG relation cache such as `cache/drkg-relations.pt`, it can be reused for smaller DRKG subsets as long as the relation names in the subset are covered by the cache. Slice-specific caches are only needed when you want the experiment artifact to be fully self-contained.
+
+## Node Embedding Cache
+
+Precompute reusable node embeddings for DRKG, PrimeKG `kg.csv`, and FB15k-237 in one command:
+
+```bash
+python -m kgml_new.scripts.build_node_embedding_caches \
+  --output-dir cache \
+  --datasets drkg primekg fb15k237 \
+  --embedding-models openai e5 gemini
+```
+
+Output files are written as:
+
+- `cache/drkg-node-embeddings-openai.pt`
+- `cache/primekg-node-embeddings-e5.pt`
+- `cache/fb15k237-node-embeddings-gemini.pt`
+
+Each `.pt` payload includes an `embeddings` tensor plus `node_ids`, `node_types`, and `node_texts`. The payload can be fed directly into `run_gpu_method --node-embeddings-path ...` (it auto-resolves the `embeddings` key).
 
 ## DRKG Slice Caveat
 

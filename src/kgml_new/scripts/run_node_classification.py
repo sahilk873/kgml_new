@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 from pathlib import Path
 
 import torch
 
-from kgml_new.config import NodeClassificationConfig
+from kgml_new.config import node_classification_config_from_args
 from kgml_new.data.datasets import (
     prepare_hetero_node_classification_dataset,
     prepare_node_classification_dataset,
@@ -36,6 +37,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embedding-dim", type=int, default=64)
     parser.add_argument("--edge-dim", type=int, default=32)
     parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--learning-rate", type=float, default=None)
+    parser.add_argument("--classifier-learning-rate", type=float, default=None)
+    parser.add_argument("--weight-decay", type=float, default=None)
+    parser.add_argument("--dropout", type=float, default=None)
+    parser.add_argument("--num-layers", type=int, default=None)
+    parser.add_argument("--num-neighbors-spec", type=str, default=None)
     parser.add_argument("--semantic", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--semantic-cache", type=Path, default=None)
     parser.add_argument("--strict-semantic", action=argparse.BooleanOptionalAction, default=False)
@@ -48,14 +55,22 @@ def parse_args() -> argparse.Namespace:
         help="GraphSAGE neighbor aggregation for sage / edge_sage / link_mlp paths.",
     )
     parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument("--optuna-trials", type=int, default=0)
+    parser.add_argument(
+        "--optuna-metric",
+        choices=("val_accuracy", "val_macro_f1"),
+        default="val_macro_f1",
+    )
+    parser.add_argument("--optuna-storage", type=str, default=None)
+    parser.add_argument("--optuna-study", type=str, default=None)
+    parser.add_argument("--optuna-seed", type=int, default=None)
+    parser.add_argument("--optuna-timeout", type=float, default=None)
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    torch.manual_seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+def run_node_classification_experiment(
+    args: argparse.Namespace, *, device: torch.device
+) -> dict:
     graph = load_pickled_graph(args.graph)
     spec = NODE_CLASSIFICATION_METHODS[args.method]
     if spec.kind == "hetero_native":
@@ -68,27 +83,14 @@ def main() -> None:
             label_attr=args.label_attr,
             seed=args.seed,
         )
-        cfg = NodeClassificationConfig(
-            in_dim=args.in_dim,
-            edge_dim=args.edge_dim,
-            hidden_dim=args.hidden_dim,
-            embedding_dim=args.embedding_dim,
-            num_classes=len(dataset.label_lookup),
-            epochs=args.epochs,
-            classifier_epochs=args.classifier_epochs,
-            batch_size=args.batch_size,
-            seed=args.seed,
-            edge_relation_mode=args.edge_relation_mode,
-            num_relation_bases=args.num_relation_bases,
-            neighbor_aggr=args.neighbor_aggr,
-        )
+        cfg = node_classification_config_from_args(args, num_classes=len(dataset.label_lookup))
         _, _, history, val_metrics, test_metrics = train_txgnn_node_classifier(
             dataset.data,
             dataset.target_node_type,
             cfg,
             device=device,
         )
-        result = {
+        return {
             "method": args.method,
             "task": "node_classification",
             "kind": spec.kind,
@@ -104,85 +106,126 @@ def main() -> None:
                 "val_macro_f1": history.val_macro_f1,
             },
         }
-    else:
-        dataset = prepare_node_classification_dataset(
-            graph,
-            in_dim=args.in_dim,
-            label_attr=args.label_attr,
-            seed=args.seed,
+
+    dataset = prepare_node_classification_dataset(
+        graph,
+        in_dim=args.in_dim,
+        label_attr=args.label_attr,
+        seed=args.seed,
+    )
+    cfg = node_classification_config_from_args(args, num_classes=len(dataset.label_lookup))
+    if spec.kind == "native":
+        _, history, val_metrics, test_metrics = train_native_node_classifier(
+            args.method,
+            dataset.data,
+            cfg,
+            device=device,
+            graph=graph,
+            relation_lookup=dataset.relation_lookup,
+            use_semantic=args.semantic,
+            semantic_cache=args.semantic_cache,
+            strict_semantic=args.strict_semantic,
         )
-        cfg = NodeClassificationConfig(
-            in_dim=args.in_dim,
-            edge_dim=args.edge_dim,
-            hidden_dim=args.hidden_dim,
-            embedding_dim=args.embedding_dim,
-            num_classes=len(dataset.label_lookup),
-            epochs=args.epochs,
-            classifier_epochs=args.classifier_epochs,
-            batch_size=args.batch_size,
-            seed=args.seed,
-            edge_relation_mode=args.edge_relation_mode,
-            num_relation_bases=args.num_relation_bases,
-            neighbor_aggr=args.neighbor_aggr,
+        return {
+            "method": args.method,
+            "task": "node_classification",
+            "kind": spec.kind,
+            "edge_relation_mode": args.edge_relation_mode,
+            "num_relation_bases": args.num_relation_bases,
+            "semantic": args.semantic,
+            "semantic_cache": str(args.semantic_cache) if args.semantic_cache else None,
+            "num_classes": len(dataset.label_lookup),
+            "label_attr": args.label_attr,
+            "val_metrics": val_metrics,
+            "test_metrics": test_metrics,
+            "history": {
+                "epoch": history.epoch,
+                "train_loss": history.train_loss,
+                "val_accuracy": history.val_accuracy,
+                "val_macro_f1": history.val_macro_f1,
+            },
+        }
+
+    _, _, history, val_metrics, test_metrics = train_embedding_node_classifier(
+        args.method,
+        dataset.data,
+        cfg,
+        device=device,
+        relation_lookup=dataset.relation_lookup,
+    )
+    return {
+        "method": args.method,
+        "task": "node_classification",
+        "kind": spec.kind,
+        "edge_relation_mode": args.edge_relation_mode,
+        "num_relation_bases": args.num_relation_bases,
+        "semantic": args.semantic,
+        "semantic_cache": str(args.semantic_cache) if args.semantic_cache else None,
+        "num_classes": len(dataset.label_lookup),
+        "label_attr": args.label_attr,
+        "val_metrics": val_metrics,
+        "test_metrics": test_metrics,
+        "history": {
+            "epoch": history.epoch,
+            "train_loss": history.train_loss,
+            "val_accuracy": history.val_accuracy,
+            "val_macro_f1": history.val_macro_f1,
+        },
+    }
+
+
+def main() -> None:
+    args = parse_args()
+    torch.manual_seed(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if args.optuna_trials > 0:
+        from kgml_new.tuning.optuna_runner import require_optuna
+        from kgml_new.tuning.spaces import (
+            apply_param_dict_to_namespace,
+            suggest_node_classification_params,
         )
-        if spec.kind == "native":
-            _, history, val_metrics, test_metrics = train_native_node_classifier(
-                args.method,
-                dataset.data,
-                cfg,
-                device=device,
-                graph=graph,
-                relation_lookup=dataset.relation_lookup,
-                use_semantic=args.semantic,
-                semantic_cache=args.semantic_cache,
-                strict_semantic=args.strict_semantic,
+
+        optuna = require_optuna()
+        optuna_seed = int(args.optuna_seed if args.optuna_seed is not None else args.seed)
+        sampler = optuna.samplers.TPESampler(seed=optuna_seed)
+        if args.optuna_storage:
+            study = optuna.create_study(
+                study_name=args.optuna_study or f"kgml_nodecls_{args.method}",
+                storage=args.optuna_storage,
+                direction="maximize",
+                sampler=sampler,
+                load_if_exists=True,
             )
-            result = {
-                "method": args.method,
-                "task": "node_classification",
-                "kind": spec.kind,
-                "edge_relation_mode": args.edge_relation_mode,
-                "num_relation_bases": args.num_relation_bases,
-                "semantic": args.semantic,
-                "semantic_cache": str(args.semantic_cache) if args.semantic_cache else None,
-                "num_classes": len(dataset.label_lookup),
-                "label_attr": args.label_attr,
-                "val_metrics": val_metrics,
-                "test_metrics": test_metrics,
-                "history": {
-                    "epoch": history.epoch,
-                    "train_loss": history.train_loss,
-                    "val_accuracy": history.val_accuracy,
-                    "val_macro_f1": history.val_macro_f1,
-                },
-            }
         else:
-            _, _, history, val_metrics, test_metrics = train_embedding_node_classifier(
-                args.method,
-                dataset.data,
-                cfg,
-                device=device,
-                relation_lookup=dataset.relation_lookup,
-            )
-            result = {
-                "method": args.method,
-                "task": "node_classification",
-                "kind": spec.kind,
-                "edge_relation_mode": args.edge_relation_mode,
-                "num_relation_bases": args.num_relation_bases,
-                "semantic": args.semantic,
-                "semantic_cache": str(args.semantic_cache) if args.semantic_cache else None,
-                "num_classes": len(dataset.label_lookup),
-                "label_attr": args.label_attr,
-                "val_metrics": val_metrics,
-                "test_metrics": test_metrics,
-                "history": {
-                    "epoch": history.epoch,
-                    "train_loss": history.train_loss,
-                    "val_accuracy": history.val_accuracy,
-                    "val_macro_f1": history.val_macro_f1,
-                },
-            }
+            study = optuna.create_study(direction="maximize", sampler=sampler)
+
+        def _objective(trial: optuna.Trial) -> float:
+            t_args = copy.deepcopy(args)
+            suggest_node_classification_params(trial, t_args)
+            torch.manual_seed(optuna_seed + trial.number * 100_003)
+            out = run_node_classification_experiment(t_args, device=device)
+            vm = out["val_metrics"]
+            key = "accuracy" if args.optuna_metric == "val_accuracy" else "macro_f1"
+            return float(vm[key])
+
+        study.optimize(
+            _objective,
+            n_trials=args.optuna_trials,
+            timeout=args.optuna_timeout,
+        )
+        t_args = copy.deepcopy(args)
+        apply_param_dict_to_namespace(t_args, study.best_params)
+        torch.manual_seed(args.seed)
+        result = run_node_classification_experiment(t_args, device=device)
+        result["optuna"] = {
+            "n_trials": len(study.trials),
+            "best_value": study.best_value,
+            "best_params": study.best_params,
+            "metric": args.optuna_metric,
+        }
+    else:
+        result = run_node_classification_experiment(args, device=device)
 
     print(json.dumps(result, indent=2))
     if args.out:

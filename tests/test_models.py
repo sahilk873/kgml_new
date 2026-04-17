@@ -254,9 +254,9 @@ def test_edge_aware_isolated_node_embedding_nonzero():
 def _get_primekg_path() -> Path:
     import pytest
 
-    p = Path(__file__).parent.parent / "kg.csv"
+    p = Path(__file__).parent.parent / "data/kg.csv"
     if not p.exists():
-        pytest.skip("PrimeKG CSV not found at kg.csv")
+        pytest.skip("PrimeKG CSV not found at data/kg.csv")
     return p
 
 

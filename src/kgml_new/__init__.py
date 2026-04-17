@@ -20,6 +20,7 @@ from kgml_new.models.edge_aware_sage import (
     RelationGatedGraphSAGE,
     build_edge_aware_model,
 )
+from kgml_new.models.hgt import HGTLinkPredictor
 from kgml_new.models.txgnn import TxGNN
 from kgml_new.training.splits import EdgeSplit, NodeSplit
 
@@ -39,6 +40,7 @@ __all__ = [
     "RelationBasisMixtureGraphSAGE",
     "RelationGatedGraphSAGE",
     "NodeSplit",
+    "HGTLinkPredictor",
     "TxGNN",
     "LinkMLPConfig",
     "load_graph_csv",

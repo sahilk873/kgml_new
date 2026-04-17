@@ -14,6 +14,6 @@ cd /nas/longleaf/home/sahilk/kgml_new
 
 .venv_legacy_gpu/bin/python -m kgml_new.scripts.run_gpu_method \
   --method link_mlp \
-  --csv kg.csv \
+  --csv data/kg.csv \
   --epochs 50 \
   --output results/slurm/link_mlp_legacy-${SLURM_JOB_ID}.json

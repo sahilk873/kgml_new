@@ -26,7 +26,7 @@ drkg.tar.gz
 hetionet-v1.0.json.bz2
 
 # Data files (download using scripts/setup_hpc.sh)
-/kg.csv
+/data/kg.csv
 /drkg.tsv
 /embed/
 /entity2src.tsv

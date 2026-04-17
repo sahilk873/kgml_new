@@ -236,7 +236,9 @@ class EdgeAwareGraphSAGE(nn.Module):
         )
 
     def forward(self, x: Tensor, edge_index: Adj, edge_attr: Tensor) -> Tensor:
-        rel = self.relation_projection(self.relation_table[edge_attr])
+        # Project the relation-type table (R x D_in) before indexing edges (E rows).
+        # Index-first materializes (E x D_in) and can OOM when E is millions and D_in is large.
+        rel = self.relation_projection(self.relation_table)[edge_attr]
         h = x
         for i, layer in enumerate(self.layers):
             h = layer(h, edge_index, rel)
@@ -464,6 +466,8 @@ def build_edge_aware_model(
     normalize_output: bool = True,
     num_relation_bases: int = 4,
     neighbor_aggr: str = "mean",
+    film_semantic_inject: bool = False,
+    rel_residual_scale: float = 0.25,
 ) -> nn.Module:
     if neighbor_aggr not in NEIGHBOR_AGGREGATIONS:
         raise ValueError(
@@ -508,6 +512,23 @@ def build_edge_aware_model(
             neighbor_aggr=neighbor_aggr,
         )
     if edge_relation_mode == "film":
+        if film_semantic_inject:
+            from kgml_new.models.semantic_relation_inject import (
+                RelationFilmGraphSAGEAdapted,
+            )
+
+            return RelationFilmGraphSAGEAdapted(
+                in_channels,
+                edge_dim,
+                hidden_channels,
+                out_channels,
+                relation_table=relation_table,
+                num_layers=num_layers,
+                dropout=dropout,
+                normalize_output=normalize_output,
+                neighbor_aggr=neighbor_aggr,
+                rel_residual_scale=rel_residual_scale,
+            )
         return RelationFilmGraphSAGE(
             in_channels,
             edge_dim,
@@ -538,7 +559,7 @@ def mixture_weights_from_relation_indices(
 
     rt = model.relation_table
     relation_indices = relation_indices.to(rt.device)
-    rel_feat = model.relation_projection(rt[relation_indices])
+    rel_feat = model.relation_projection(rt)[relation_indices]
 
     basis_layers = [
         m

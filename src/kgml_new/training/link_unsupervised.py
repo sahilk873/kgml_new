@@ -186,6 +186,9 @@ def train_unsupervised_batched(
     edge_attr_for_alignment: torch.Tensor | None = None,
     alignment_train_pos_edge_index: torch.Tensor | None = None,
     alignment_train_pos_edge_attr: torch.Tensor | None = None,
+    relation_decode_bundle: nn.Module | None = None,
+    train_uv_relation_lookup: dict[tuple[int, int], int] | None = None,
+    metric_eval_data: Data | None = None,
 ) -> tuple[nn.Module, int, TrainingHistory]:
     return _train_unsupervised_batched(
         model=model,
@@ -206,6 +209,9 @@ def train_unsupervised_batched(
         edge_attr_for_alignment=edge_attr_for_alignment,
         alignment_train_pos_edge_index=alignment_train_pos_edge_index,
         alignment_train_pos_edge_attr=alignment_train_pos_edge_attr,
+        relation_decode_bundle=relation_decode_bundle,
+        train_uv_relation_lookup=train_uv_relation_lookup,
+        metric_eval_data=metric_eval_data,
     )
 
 
@@ -225,9 +231,16 @@ def _train_unsupervised_fullgraph(
     semantic_similarity_matrix: torch.Tensor | None = None,
     semantic_alignment_lambda: float = 0.0,
     edge_attr_for_alignment: torch.Tensor | None = None,
+    relation_decode_bundle: nn.Module | None = None,
+    train_uv_relation_lookup: dict[tuple[int, int], int] | None = None,
+    metric_eval_data: Data | None = None,
 ) -> tuple[nn.Module, int, TrainingHistory]:
     """Full-graph training (no neighbor sampling) with history tracking."""
-    from kgml_new.training.eval import link_prediction_dot_product
+    from kgml_new.training.eval import (
+        evaluate_inductive_link_prediction,
+        link_prediction_dot_product,
+    )
+    from kgml_new.training.relation_decode_batch import relation_ids_for_uv_pairs
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -280,18 +293,39 @@ def _train_unsupervised_fullgraph(
                 continue
             optimizer.zero_grad()
             z = _encode(model, data, device, edge_aware)
-            pos_logits = (z[s] * z[d]).sum(dim=-1)
+            if relation_decode_bundle is not None and train_uv_relation_lookup is not None:
+                pos_ei = torch.stack([s, d], dim=0)
+                pos_rel = relation_ids_for_uv_pairs(
+                    s, d, train_uv_relation_lookup, device=device
+                )
+                pos_logits = relation_decode_bundle.decode_logits(
+                    z, pos_ei, pos_rel
+                )
+                neg = torch.multinomial(
+                    weights,
+                    num_samples=s.size(0) * config.neg_samples,
+                    replacement=True,
+                )
+                neg = neg.view(s.size(0), config.neg_samples)
+                src_exp = s.unsqueeze(1).expand_as(neg)
+                neg_ei = torch.stack([src_exp.reshape(-1), neg.reshape(-1)], dim=0)
+                neg_rel = pos_rel.repeat_interleave(int(config.neg_samples))
+                neg_logits = relation_decode_bundle.decode_logits(
+                    z, neg_ei, neg_rel
+                ).view(s.size(0), config.neg_samples)
+            else:
+                pos_logits = (z[s] * z[d]).sum(dim=-1)
+                neg = torch.multinomial(
+                    weights,
+                    num_samples=s.size(0) * config.neg_samples,
+                    replacement=True,
+                )
+                neg = neg.view(s.size(0), config.neg_samples)
+                src_exp = s.unsqueeze(1).expand_as(neg)
+                neg_logits = (z[src_exp] * z[neg]).sum(dim=-1)
             pos_loss = F.binary_cross_entropy_with_logits(
                 pos_logits, torch.ones_like(pos_logits), reduction="sum"
             )
-
-            neg = torch.multinomial(
-                weights, num_samples=s.size(0) * config.neg_samples, replacement=True
-            )
-            neg = neg.view(s.size(0), config.neg_samples)
-
-            src_exp = s.unsqueeze(1).expand_as(neg)
-            neg_logits = (z[src_exp] * z[neg]).sum(dim=-1)
             neg_loss = F.binary_cross_entropy_with_logits(
                 neg_logits, torch.zeros_like(neg_logits), reduction="sum"
             )
@@ -337,11 +371,30 @@ def _train_unsupervised_fullgraph(
 
         val_auc, val_ap = None, None
         if val_pos_edge_index is not None and val_neg_edge_index is not None:
-            with torch.inference_mode():
-                z_eval = _encode(model, data, device, edge_aware)
-            metrics = link_prediction_dot_product(
-                z_eval, val_pos_edge_index, val_neg_edge_index
-            )
+            if (
+                relation_decode_bundle is not None
+                and metric_eval_data is not None
+            ):
+                metrics = evaluate_inductive_link_prediction(
+                    model,
+                    metric_eval_data,
+                    pos_edge_index=val_pos_edge_index,
+                    neg_edge_index=val_neg_edge_index,
+                    negatives_per_pos=int(config.neg_samples),
+                    device=device,
+                    edge_aware=edge_aware,
+                    num_neighbors=list(config.num_neighbors),
+                    decoder="dot",
+                    decoder_model=None,
+                    batch_size=int(config.batch_size),
+                    rel_decode_bundle=relation_decode_bundle,
+                )
+            else:
+                with torch.inference_mode():
+                    z_eval = _encode(model, data, device, edge_aware)
+                metrics = link_prediction_dot_product(
+                    z_eval, val_pos_edge_index, val_neg_edge_index
+                )
             val_auc = metrics["roc_auc"]
             val_ap = metrics["average_precision"]
             history.val_auc.append(val_auc)
@@ -397,12 +450,18 @@ def _train_unsupervised_batched(
     edge_attr_for_alignment: torch.Tensor | None = None,
     alignment_train_pos_edge_index: torch.Tensor | None = None,
     alignment_train_pos_edge_attr: torch.Tensor | None = None,
+    relation_decode_bundle: nn.Module | None = None,
+    train_uv_relation_lookup: dict[tuple[int, int], int] | None = None,
+    metric_eval_data: Data | None = None,
 ) -> tuple[nn.Module, int, TrainingHistory]:
     """
     Batched link prediction using LinkNeighborLoader (original GraphSAGE algorithm).
     Uses mini-batch neighbor sampling to scale to millions of edges.
     """
-    from kgml_new.training.eval import link_prediction_dot_product
+    from kgml_new.training.eval import (
+        evaluate_inductive_link_prediction,
+        link_prediction_dot_product,
+    )
     from torch_geometric.loader import LinkNeighborLoader
     from torch_geometric.typing import WITH_PYG_LIB, WITH_TORCH_SPARSE
 
@@ -426,6 +485,9 @@ def _train_unsupervised_batched(
             semantic_similarity_matrix=semantic_similarity_matrix,
             semantic_alignment_lambda=semantic_alignment_lambda,
             edge_attr_for_alignment=edge_attr_for_alignment,
+            relation_decode_bundle=relation_decode_bundle,
+            train_uv_relation_lookup=train_uv_relation_lookup,
+            metric_eval_data=metric_eval_data,
         )
 
     alignment_lookup: dict[tuple[int, int], int] | None = None
@@ -465,6 +527,10 @@ def _train_unsupervised_batched(
 
     if num_neighbors is None:
         num_neighbors = config.num_neighbors
+
+    from kgml_new.training.relation_decode_batch import (
+        relation_ids_for_link_neighbor_batch,
+    )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
     ckpt_path = Path(checkpoint_path) if checkpoint_path else None
@@ -519,7 +585,20 @@ def _train_unsupervised_batched(
 
             edge_label_index = batch.edge_label_index
             edge_label = batch.edge_label.float()
-            logits = (z[edge_label_index[0]] * z[edge_label_index[1]]).sum(dim=-1)
+            if relation_decode_bundle is not None and train_uv_relation_lookup is not None:
+                rel_ids = relation_ids_for_link_neighbor_batch(
+                    edge_label_index,
+                    edge_label,
+                    batch.n_id,
+                    train_uv_relation_lookup,
+                    int(config.neg_samples),
+                    device=device,
+                )
+                logits = relation_decode_bundle.decode_logits(
+                    z, edge_label_index, rel_ids
+                )
+            else:
+                logits = (z[edge_label_index[0]] * z[edge_label_index[1]]).sum(dim=-1)
             batch_loss = F.binary_cross_entropy_with_logits(logits, edge_label)
 
             if (
@@ -566,11 +645,30 @@ def _train_unsupervised_batched(
 
         val_auc, val_ap = None, None
         if val_pos_edge_index is not None and val_neg_edge_index is not None:
-            with torch.inference_mode():
-                z_eval = _encode(model, data, device, edge_aware)
-            metrics = link_prediction_dot_product(
-                z_eval, val_pos_edge_index, val_neg_edge_index
-            )
+            if (
+                relation_decode_bundle is not None
+                and metric_eval_data is not None
+            ):
+                metrics = evaluate_inductive_link_prediction(
+                    model,
+                    metric_eval_data,
+                    pos_edge_index=val_pos_edge_index,
+                    neg_edge_index=val_neg_edge_index,
+                    negatives_per_pos=int(config.neg_samples),
+                    device=device,
+                    edge_aware=edge_aware,
+                    num_neighbors=num_neighbors,
+                    decoder="dot",
+                    decoder_model=None,
+                    batch_size=int(config.batch_size),
+                    rel_decode_bundle=relation_decode_bundle,
+                )
+            else:
+                with torch.inference_mode():
+                    z_eval = _encode(model, data, device, edge_aware)
+                metrics = link_prediction_dot_product(
+                    z_eval, val_pos_edge_index, val_neg_edge_index
+                )
             val_auc = metrics["roc_auc"]
             val_ap = metrics["average_precision"]
             history.val_auc.append(val_auc)

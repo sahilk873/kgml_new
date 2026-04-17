@@ -15,7 +15,7 @@ mkdir -p logs/slurm results/slurm
 export PYTHONPATH=src
 
 .venv/bin/python -m kgml_new.scripts.run_txgnn \
-  --csv kg.csv \
+  --csv data/kg.csv \
   --relation indication \
   --device cuda \
   --batch-size 1024 \

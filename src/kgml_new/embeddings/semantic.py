@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+import os
 import re
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -24,7 +26,7 @@ from kgml_new.data.relations import RELATION_DESCRIPTIONS, get_edge_types
 
 DEFAULT_GLOSSARY_PATH = Path(__file__).resolve().parents[3] / "relation_glossary.tsv"
 
-EmbeddingModel = Literal["openai", "sapbert", "random"]
+EmbeddingModel = Literal["openai", "gemini", "sapbert", "e5", "random"]
 RelationTextMode = Literal["raw", "canonical"]
 
 
@@ -329,6 +331,88 @@ async def _embed_async(
     return [d.embedding for d in response.data]
 
 
+def _gemini_embed_response_to_vectors(response) -> list[list[float]]:
+    if hasattr(response, "embeddings") and response.embeddings is not None:
+        return [list(item.values) for item in response.embeddings]
+    if hasattr(response, "embedding") and response.embedding is not None:
+        return [list(response.embedding.values)]
+    raise RuntimeError("Gemini embedding response did not include embeddings.")
+
+
+def _gemini_embed_chunk_with_retries(client, model: str, chunk: list[str]):
+    """Call embed_content with backoff on rate limits."""
+    last_exc: BaseException | None = None
+    for attempt in range(20):
+        try:
+            return client.models.embed_content(model=model, contents=chunk)
+        except Exception as exc:
+            last_exc = exc
+            msg = str(exc)
+            if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+                delay = min(3.0 * (1.35**attempt), 120.0)
+                time.sleep(delay)
+                continue
+            raise
+    assert last_exc is not None
+    raise last_exc
+
+
+def _embed_gemini(
+    texts: list[str], model_name: str = "gemini-3.1-flash-lite-preview"
+) -> list[list[float]]:
+    """Generate embeddings via Gemini API."""
+    from google import genai
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY is not set; add it to your environment or .env file."
+        )
+
+    client = genai.Client(api_key=api_key)
+    requested_model = model_name
+    effective_model = model_name
+    # BatchEmbedContents allows at most 100 requests per call.
+    batch_size = 100
+    merged: list[list[float]] = []
+
+    for batch_idx, start in enumerate(range(0, len(texts), batch_size)):
+        if batch_idx > 0:
+            # Free tier embed quotas are tight; avoid back-to-back bursts across batches.
+            time.sleep(65.0)
+        chunk = texts[start : start + batch_size]
+        if batch_idx == 0:
+            try:
+                response = _gemini_embed_chunk_with_retries(
+                    client, effective_model, chunk
+                )
+            except Exception as exc:
+                message = str(exc)
+                if (
+                    "not supported for embedContent" in message
+                    or "is not found for API version" in message
+                ) and requested_model != "gemini-embedding-001":
+                    # Gemini Flash models are generation models; embedContent expects
+                    # an embedding-capable model such as gemini-embedding-001.
+                    effective_model = "gemini-embedding-001"
+                    print(
+                        f"Gemini model '{requested_model}' is not embedding-capable; "
+                        f"retrying with '{effective_model}'."
+                    )
+                    response = _gemini_embed_chunk_with_retries(
+                        client, effective_model, chunk
+                    )
+                else:
+                    raise
+        else:
+            response = _gemini_embed_chunk_with_retries(
+                client, effective_model, chunk
+            )
+        merged.extend(_gemini_embed_response_to_vectors(response))
+
+    return merged
+
+
 def _embed_sapbert(
     texts: list[str],
     model_name: str = "cambridgeltl/SapBERT-from-PubMedBERT-fulltext-mean-token",
@@ -336,7 +420,22 @@ def _embed_sapbert(
     """Generate embeddings using SapBERT (PubMedBERT-based biomedical embeddings)."""
     from sentence_transformers import SentenceTransformer
 
-    model = SentenceTransformer(model_name)
+    # Prefer an explicit token from the environment (for clusters that require auth
+    # even for public downloads), but avoid implicit cached tokens that might be stale.
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN") or False
+    model = SentenceTransformer(model_name, token=token)
+    embeddings = model.encode(texts, show_progress_bar=True, convert_to_numpy=True)
+    return embeddings.tolist()
+
+
+def _embed_e5(
+    texts: list[str], model_name: str = "intfloat/e5-base-v2"
+) -> list[list[float]]:
+    """Generate embeddings using E5 (SentenceTransformers-compatible HuggingFace model)."""
+    from sentence_transformers import SentenceTransformer
+
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN") or False
+    model = SentenceTransformer(model_name, token=token)
     embeddings = model.encode(texts, show_progress_bar=True, convert_to_numpy=True)
     return embeddings.tolist()
 
@@ -387,6 +486,8 @@ def relation_embeddings_from_relation_types(
     strict_embedding: bool = False,
     glossary_path: Path | None = None,
     sapbert_model: str = "cambridgeltl/SapBERT-from-PubMedBERT-fulltext-mean-token",
+    e5_model: str = "intfloat/e5-base-v2",
+    gemini_model: str = "gemini-3.1-flash-lite-preview",
 ) -> dict[str, torch.Tensor]:
     """Generate relation embeddings using specified model.
 
@@ -394,14 +495,17 @@ def relation_embeddings_from_relation_types(
         relation_types: List of relation type strings
         edge_dim: Dimension for random embeddings
         cache_path: Path to save/load cache
-        embedding_model: Model to use - "openai", "sapbert", or "random"
+        embedding_model: Model to use - "openai", "gemini", "sapbert", "e5", or "random"
         relation_text_mode: "raw" for original glossary text, "canonical" for rewritten clean text
         strict_embedding: If True, raise error on embedding failure
         glossary_path: Path to relation glossary
         sapbert_model: HuggingFace model name for SapBERT
+        e5_model: HuggingFace model name for E5
     """
     use_openai = embedding_model == "openai"
+    use_gemini = embedding_model == "gemini"
     use_sapbert = embedding_model == "sapbert"
+    use_e5 = embedding_model == "e5"
     use_random = embedding_model == "random"
 
     # Check cache
@@ -462,6 +566,20 @@ def relation_embeddings_from_relation_types(
             print(f"SapBERT embedding failed: {e}, using random embeddings")
             use_random = True
 
+    if use_e5:
+        try:
+            embeddings = _embed_e5(texts, model_name=e5_model)
+            for rel, emb in zip(rel_types, embeddings):
+                rel_emb[rel] = torch.tensor(emb, dtype=torch.float32)
+            print(f"Generated E5 embeddings ({e5_model}) for {len(rel_types)} relations")
+        except Exception as e:
+            if strict_embedding:
+                raise RuntimeError(
+                    f"E5 embedding failed while strict_embedding=True: {e}"
+                ) from e
+            print(f"E5 embedding failed: {e}, using random embeddings")
+            use_random = True
+
     if use_openai:
         try:
             from openai import AsyncOpenAI
@@ -489,6 +607,29 @@ def relation_embeddings_from_relation_types(
             print(f"OpenAI embedding failed: {e}, using random embeddings")
             use_random = True
 
+    if use_gemini:
+        try:
+            embeddings = _embed_gemini(texts, model_name=gemini_model)
+            for rel, emb in zip(rel_types, embeddings):
+                rel_emb[rel] = torch.tensor(emb, dtype=torch.float32)
+            print(
+                f"Generated Gemini embeddings ({gemini_model}) for {len(rel_types)} relations"
+            )
+        except ModuleNotFoundError as e:
+            if strict_embedding:
+                raise RuntimeError(
+                    "Gemini dependency missing while strict_embedding=True"
+                ) from e
+            print(f"Gemini dependency missing ({e}); using random embeddings")
+            use_random = True
+        except Exception as e:
+            if strict_embedding:
+                raise RuntimeError(
+                    f"Gemini embedding failed while strict_embedding=True: {e}"
+                ) from e
+            print(f"Gemini embedding failed: {e}, using random embeddings")
+            use_random = True
+
     if use_random:
         rng = torch.Generator()
         rng.manual_seed(42)
@@ -506,7 +647,10 @@ def relation_embeddings_from_relation_types(
                     "embedding_model": embedding_model,
                     "relation_text_mode": relation_text_mode,
                     "sapbert_model": sapbert_model if use_sapbert else None,
+                    "e5_model": e5_model if use_e5 else None,
+                    "gemini_model": gemini_model if use_gemini else None,
                     "use_openai": use_openai,
+                    "use_gemini": use_gemini,
                     "embedding_dim": _infer_embedding_dim(rel_emb, edge_dim),
                     "embeddings": rel_emb,
                 },
@@ -526,12 +670,14 @@ def relation_embeddings_from_graph(
     strict_embedding: bool = False,
     glossary_path: Path | None = None,
     sapbert_model: str = "cambridgeltl/SapBERT-from-PubMedBERT-fulltext-mean-token",
+    e5_model: str = "intfloat/e5-base-v2",
+    gemini_model: str = "gemini-3.1-flash-lite-preview",
 ) -> dict[str, torch.Tensor]:
     """
     Get relation embeddings from graph edges using specified embedding model.
 
     If cache_path is provided, loads from cache or saves to cache.
-    embedding_model: "openai", "sapbert", or "random"
+    embedding_model: "openai", "gemini", "sapbert", "e5", or "random"
     relation_text_mode: "raw" for original glossary text, "canonical" for rewritten clean text
     If strict_embedding is True and embedding fails, raises RuntimeError.
     """
@@ -545,6 +691,8 @@ def relation_embeddings_from_graph(
         strict_embedding=strict_embedding,
         glossary_path=glossary_path,
         sapbert_model=sapbert_model,
+        e5_model=e5_model,
+        gemini_model=gemini_model,
     )
 
 

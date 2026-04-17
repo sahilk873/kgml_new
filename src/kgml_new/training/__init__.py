@@ -27,6 +27,7 @@ from kgml_new.training.train_link_mlp import (
     train_link_mlp,
     train_link_mlp_with_validation,
 )
+from kgml_new.training.hgt_train import HGTTrainResult, evaluate_hgt_relation, train_hgt
 from kgml_new.training.txgnn_train import TxGNNTrainResult, evaluate_relation, train_txgnn
 
 __all__ = [
@@ -52,4 +53,7 @@ __all__ = [
     "train_txgnn",
     "evaluate_relation",
     "TxGNNTrainResult",
+    "train_hgt",
+    "evaluate_hgt_relation",
+    "HGTTrainResult",
 ]

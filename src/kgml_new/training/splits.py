@@ -491,6 +491,154 @@ def create_node_split(
     )
 
 
+def create_node_category_split(
+    edge_index: torch.Tensor,
+    *,
+    node_types: list[str],
+    held_out_node_categories: set[str] | frozenset[str],
+    num_src_nodes: int,
+    num_dst_nodes: int | None = None,
+    val_ratio: float = 0.15,
+    test_ratio: float = 0.15,
+    seed: int = 42,
+    undirected: bool = True,
+    negative_sampling_mode: str = "type_matched",
+    negatives_per_pos: int = 20,
+) -> NodeSplit:
+    """
+    Link split that holds out **node types** (from ``node_types``) from training positives.
+
+    - Training positives are only edges whose **both** endpoints have types outside
+      ``held_out_node_categories``.
+    - Nodes whose type is held out are partitioned into val vs test **node sets**
+      (``test_ratio / (val_ratio + test_ratio)`` of held-out nodes go to the test set,
+      at least one node in each side when there are two or more held-out nodes), so
+      val/test positives are disjoint and match the usual ``NodeSplit`` mask semantics.
+    - Query positives are edges incident to the val (resp. test) held-out node set;
+      edges touching the test held-out set are assigned to **test** if they would
+      otherwise be ambiguous.
+
+    Requires at least two nodes whose type is in ``held_out_node_categories`` so the
+    val/test node partition is non-trivial.
+    """
+    if num_dst_nodes is None:
+        num_dst_nodes = num_src_nodes
+    if num_src_nodes != num_dst_nodes:
+        raise ValueError("node_category split currently expects a homogeneous graph")
+    if len(node_types) != num_src_nodes:
+        raise ValueError("node_types must have length num_src_nodes")
+
+    held: frozenset[str] = frozenset(str(x) for x in held_out_node_categories)
+    if not held:
+        raise ValueError("held_out_node_categories must be non-empty")
+
+    vocab_types = {str(t) for t in node_types}
+    unknown = sorted(held - vocab_types)
+    if unknown:
+        raise ValueError(
+            "held_out_node_categories contains types not present on any node: "
+            + ", ".join(unknown)
+        )
+
+    held_type_mask = torch.tensor(
+        [str(node_types[i]) in held for i in range(num_src_nodes)],
+        dtype=torch.bool,
+    )
+    held_node_list = torch.where(held_type_mask)[0].tolist()
+    if len(held_node_list) < 2:
+        raise ValueError(
+            "node_category split needs at least two nodes whose type is in "
+            "held_out_node_categories (so val/test held-out partitions are non-empty). "
+            f"Found {len(held_node_list)} such node(s)."
+        )
+
+    nh = len(held_node_list)
+    frac_test = float(test_ratio) / (float(val_ratio) + float(test_ratio) + 1e-12)
+    num_test = max(1, min(nh - 1, int(round(frac_test * nh))))
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    perm = torch.randperm(nh, generator=generator)
+    test_local = perm[:num_test]
+    val_local = perm[num_test:]
+    val_nodes = {held_node_list[int(i)] for i in val_local.tolist()}
+    test_nodes = {held_node_list[int(i)] for i in test_local.tolist()}
+
+    train_node_mask = torch.zeros(num_src_nodes, dtype=torch.bool)
+    val_node_mask = torch.zeros(num_src_nodes, dtype=torch.bool)
+    test_node_mask = torch.zeros(num_src_nodes, dtype=torch.bool)
+    for i in range(num_src_nodes):
+        if held_type_mask[i]:
+            if i in val_nodes:
+                val_node_mask[i] = True
+            else:
+                test_node_mask[i] = True
+        else:
+            train_node_mask[i] = True
+
+    pos = _canonicalize_undirected_edges(edge_index) if undirected else edge_index.cpu().long()
+    src, dst = pos[0], pos[1]
+    train_edge_mask = train_node_mask[src] & train_node_mask[dst]
+    test_edge_mask = test_node_mask[src] | test_node_mask[dst]
+    val_edge_mask = ~test_edge_mask & (val_node_mask[src] | val_node_mask[dst])
+
+    n_train = int(train_edge_mask.sum().item())
+    n_val = int(val_edge_mask.sum().item())
+    n_test = int(test_edge_mask.sum().item())
+    if n_train == 0:
+        raise ValueError(
+            "No training positives after node_category holdout; broaden allowed types "
+            "or shrink held_out_node_categories."
+        )
+    if n_val == 0 or n_test == 0:
+        raise ValueError(
+            "node_category split produced empty val or test positives "
+            f"(val={n_val}, test={n_test}). Adjust val/test ratio or held-out types / graph."
+        )
+
+    train_pos = pos[:, train_edge_mask]
+    val_pos = pos[:, val_edge_mask]
+    test_pos = pos[:, test_edge_mask]
+    val_pos = _orient_query_edges(val_pos, primary_node_mask=train_node_mask)
+    test_pos = _orient_query_edges(test_pos, primary_node_mask=train_node_mask)
+
+    val_neg = sample_query_negative_edges(
+        val_pos,
+        positive_edge_index=pos,
+        num_src_nodes=num_src_nodes,
+        num_dst_nodes=num_dst_nodes,
+        node_types=node_types,
+        negatives_per_pos=negatives_per_pos,
+        mode=negative_sampling_mode,
+        seed=seed + 1,
+        undirected=undirected,
+        bipartite=False,
+    )
+    test_neg = sample_query_negative_edges(
+        test_pos,
+        positive_edge_index=pos,
+        num_src_nodes=num_src_nodes,
+        num_dst_nodes=num_dst_nodes,
+        node_types=node_types,
+        negatives_per_pos=negatives_per_pos,
+        mode=negative_sampling_mode,
+        seed=seed + 2,
+        undirected=undirected,
+        bipartite=False,
+    )
+
+    return NodeSplit(
+        train_node_mask=train_node_mask,
+        val_node_mask=val_node_mask,
+        test_node_mask=test_node_mask,
+        train_pos_edge_index=train_pos,
+        val_pos_edge_index=val_pos,
+        test_pos_edge_index=test_pos,
+        val_neg_edge_index=val_neg,
+        test_neg_edge_index=test_neg,
+        negatives_per_pos=negatives_per_pos,
+    )
+
+
 def create_edge_split_relation_holdout(
     edge_index: torch.Tensor,
     edge_attr: torch.Tensor,

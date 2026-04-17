@@ -45,6 +45,12 @@ def _held_out_relations_from_args(args: argparse.Namespace) -> list[str] | None:
     return names or None
 
 
+def _held_out_node_categories_from_args(args: argparse.Namespace) -> list[str] | None:
+    names = [str(x).strip() for x in getattr(args, "held_out_node_categories", []) or []]
+    names = [x for x in names if x]
+    return names or None
+
+
 def _spec_from_args(args: argparse.Namespace) -> GraphCSVSpec:
     return GraphCSVSpec(
         source_col=args.source_col,
@@ -93,7 +99,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--target-type-col", type=str, default=PRIMEKG_CSV_SPEC.target_type_col)
     p.add_argument(
         "--split-protocol",
-        choices=("node", "edge"),
+        choices=("node", "node_category", "edge"),
         default="edge",
         help="Must match future training runs (default edge, same as drkg_full_experiments_array.slurm).",
     )
@@ -116,6 +122,13 @@ def parse_args() -> argparse.Namespace:
         default=[],
         metavar="REL",
         help="Same as run_gpu_method: relation names excluded from training positives.",
+    )
+    p.add_argument(
+        "--held-out-node-categories",
+        nargs="*",
+        default=[],
+        metavar="TYPE",
+        help="Same as run_gpu_method: required for split-protocol node_category.",
     )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--in-dim", type=int, default=64)
@@ -159,6 +172,7 @@ def main() -> None:
         shuffle_relations=args.shuffle_relations,
         add_self_loops=args.add_self_loops,
         held_out_relations=_held_out_relations_from_args(args),
+        held_out_node_categories=_held_out_node_categories_from_args(args),
     )
     _log(
         f"Prepared: split={dataset.split_protocol} neg_mode={dataset.negative_sampling_mode} "

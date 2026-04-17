@@ -56,9 +56,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--embedding-model",
         type=str,
-        choices=["openai", "sapbert", "random"],
+        choices=["openai", "gemini", "sapbert", "e5", "random"],
         default="openai",
-        help="Embedding model: openai (text-embedding-3-small), sapbert (PubMedBERT-based), or random",
+        help="Embedding model (default openai): openai, gemini, sapbert (PubMedBERT-based), e5, or random",
     )
     parser.add_argument(
         "--relation-text-mode",
@@ -74,10 +74,22 @@ def parse_args() -> argparse.Namespace:
         help="HuggingFace model name for SapBERT",
     )
     parser.add_argument(
+        "--e5-model",
+        type=str,
+        default="intfloat/e5-base-v2",
+        help="HuggingFace model name for E5",
+    )
+    parser.add_argument(
         "--strict-embedding",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Fail instead of falling back if embedding fails.",
+    )
+    parser.add_argument(
+        "--gemini-model",
+        type=str,
+        default="gemini-3.1-flash-lite-preview",
+        help="Gemini model name for embeddings.",
     )
     return parser.parse_args()
 
@@ -125,7 +137,7 @@ def _load_relation_types_from_table(args: argparse.Namespace) -> list[str]:
             args.input,
             sep=delimiter,
             header=None,
-            usecols=[1],
+            usecols=[0, 1, 2],
             names=[spec.source_col, relation_col, spec.target_col],
             nrows=args.max_edges,
             low_memory=False,
@@ -149,6 +161,8 @@ def main() -> None:
             strict_embedding=args.strict_embedding,
             glossary_path=args.glossary_path,
             sapbert_model=args.sapbert_model,
+            e5_model=args.e5_model,
+            gemini_model=args.gemini_model,
         )
     else:
         edge_types = _load_relation_types_from_table(args)
@@ -161,12 +175,18 @@ def main() -> None:
             strict_embedding=args.strict_embedding,
             glossary_path=args.glossary_path,
             sapbert_model=args.sapbert_model,
+            e5_model=args.e5_model,
+            gemini_model=args.gemini_model,
         )
     print(f"Saved {len(rel_emb)} relation embeddings to {args.output}")
     print(f"Embedding model: {args.embedding_model}")
     print(f"Relation text mode: {args.relation_text_mode}")
     if args.embedding_model == "sapbert":
         print(f"SapBERT model: {args.sapbert_model}")
+    if args.embedding_model == "e5":
+        print(f"E5 model: {args.e5_model}")
+    if args.embedding_model == "gemini":
+        print(f"Gemini model: {args.gemini_model}")
     print(f"Glossary path: {args.glossary_path}")
     # Print embedding dimension
     if len(rel_emb) > 0:
