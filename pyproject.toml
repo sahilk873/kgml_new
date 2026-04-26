@@ -21,7 +21,11 @@ dependencies = [
 [project.optional-dependencies]
 semantic = ["openai>=1.0", "google-genai>=1.0.0", "python-dotenv>=1.0"]
 tuning = ["optuna>=3.0"]
+viz = ["umap-learn>=0.5", "matplotlib>=3.7", "pyyaml>=6.0"]
+plots = ["matplotlib>=3.7"]
 dev = ["pytest>=7.0", "optuna>=3.0"]
+# HGT LinkNeighborLoader (after CUDA torch): torch_scatter + torch_sparse from PyG wheels (same torch+cuda tag).
+# Omit pyg_lib on RHEL8/glibc<2.29 unless you build from source — see scripts/bootstrap_gpu_venv.sh
 
 [project.scripts]
 kgml-new-link-pred = "kgml_new.scripts.run_link_prediction:main"
@@ -29,6 +33,10 @@ kgml-new-node-cls = "kgml_new.scripts.run_node_classification:main"
 kgml-new-txgnn = "kgml_new.scripts.run_txgnn:main"
 kgml-new-hgt = "kgml_new.scripts.run_hgt:main"
 kgml-new-build-node-caches = "kgml_new.scripts.build_node_embedding_caches:main"
+kgml-new-plot-curves = "kgml_new.scripts.plot_training_curves:main"
+kgml-new-loss-figures-primekg-fb15k = "kgml_new.scripts.make_primekg_fb15k_loss_figures:main"
+kgml-new-umap-compare = "kgml_new.scripts.umap_compare_methods:main"
+kgml-new-export-hgt-embeddings = "kgml_new.scripts.export_hgt_embeddings:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

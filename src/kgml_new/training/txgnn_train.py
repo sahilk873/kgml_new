@@ -8,6 +8,10 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 from torch_geometric.data import HeteroData
 
 from kgml_new.models.txgnn import TxGNN
+from kgml_new.training.eval import (
+    grouped_link_prediction_metrics,
+    mean_bce_logits_link_prediction,
+)
 
 
 @dataclass
@@ -15,6 +19,7 @@ class TxGNNTrainResult:
     train_loss: list[float]
     val_auc: list[float]
     val_ap: list[float]
+    val_loss: list[float]
 
 
 def _sample_negative_edges(
@@ -86,7 +91,7 @@ def train_txgnn(
     num_src = data[src_type].num_nodes
     num_dst = data[dst_type].num_nodes
 
-    history = TxGNNTrainResult(train_loss=[], val_auc=[], val_ap=[])
+    history = TxGNNTrainResult(train_loss=[], val_auc=[], val_ap=[], val_loss=[])
     
     best_val_auc = 0.0
     patience_counter = 0
@@ -139,16 +144,26 @@ def train_txgnn(
         history.train_loss.append(avg_loss)
 
         if val_pos_edge_index is not None and val_neg_edge_index is not None:
-            auc, ap = evaluate_relation(
-                model,
-                data,
-                edge_type,
-                val_pos_edge_index,
-                val_neg_edge_index,
-                device,
+            model.eval()
+            with torch.inference_mode():
+                z_dict = model.encode(data.to(device))
+                vp = val_pos_edge_index.to(device)
+                vn = val_neg_edge_index.to(device)
+                pos_logits = model.score_edges(z_dict, edge_type, vp)
+                neg_logits = model.score_edges(z_dict, edge_type, vn)
+            metrics = grouped_link_prediction_metrics(
+                pos_logits.detach(), neg_logits.detach()
             )
-            history.val_auc.append(float(auc))
-            history.val_ap.append(float(ap))
+            auc = float(metrics["roc_auc"])
+            ap = float(metrics["average_precision"])
+            val_loss = float(
+                mean_bce_logits_link_prediction(
+                    pos_logits.flatten(), neg_logits.flatten()
+                )
+            )
+            history.val_auc.append(auc)
+            history.val_ap.append(ap)
+            history.val_loss.append(val_loss)
             scheduler.step(auc)
             
             if auc > best_val_auc:
@@ -160,7 +175,11 @@ def train_txgnn(
         if epoch % 5 == 0 or epoch == epochs - 1:
             suffix = ""
             if history.val_auc:
-                suffix = f" val_auc={history.val_auc[-1]:.4f} val_ap={history.val_ap[-1]:.4f}"
+                suffix = (
+                    f" val_auc={history.val_auc[-1]:.4f} val_ap={history.val_ap[-1]:.4f}"
+                )
+                if history.val_loss:
+                    suffix = f"{suffix} val_loss={history.val_loss[-1]:.4f}"
             lr_str = f" lr={optimizer.param_groups[0]['lr']:.2e}"
             print(f"epoch {epoch:04d} loss={avg_loss:.4f}{suffix}{lr_str}")
         

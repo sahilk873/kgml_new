@@ -1,0 +1,41 @@
+[
+  {
+    "name": "baseline_gcn",
+    "path": "results/slurm/artifacts/primekg_edge_baseline_gcn_3257383_1.train_embeddings.pt",
+    "kind": "tensor",
+    "expected_num_nodes": 129262
+  },
+  {
+    "name": "baseline_sage",
+    "path": "results/slurm/artifacts/primekg_edge_baseline_sage_3265306_2.train_embeddings.pt",
+    "kind": "tensor",
+    "expected_num_nodes": 129262
+  },
+  {
+    "name": "edge_aware_openai",
+    "path": "results/slurm/artifacts/primekg_edge_edge_aware_sage_concat_openai_3265307_3.encoder.pt",
+    "kind": "edge_aware_encoder",
+    "expected_num_nodes": 129262,
+    "result_json": "results/slurm/primekg_edge_edge_aware_sage_concat_openai_3265307_3.json"
+  },
+  {
+    "name": "edge_aware_e5",
+    "path": "results/slurm/artifacts/primekg_edge_edge_aware_sage_concat_e5_3257383_5.encoder.pt",
+    "kind": "edge_aware_encoder",
+    "expected_num_nodes": 129262,
+    "result_json": "results/slurm/primekg_edge_edge_aware_sage_concat_e5_3257383_5.json"
+  },
+  {
+    "name": "edge_aware_gemini",
+    "path": "results/slurm/artifacts/primekg_edge_edge_aware_sage_concat_gemini_3266959_4.encoder.pt",
+    "kind": "edge_aware_encoder",
+    "expected_num_nodes": 129262,
+    "result_json": "results/slurm/primekg_edge_edge_aware_sage_concat_gemini_3266959_4.json"
+  },
+  {
+    "name": "hgt_edge",
+    "path": "figures/umap/embeddings/hgt_primekg_edge.export.pt",
+    "kind": "tensor",
+    "expected_num_nodes": 129262
+  }
+]

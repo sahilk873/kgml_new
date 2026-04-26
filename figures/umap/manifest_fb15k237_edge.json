@@ -1,0 +1,44 @@
+[
+  {
+    "name": "baseline_gcn",
+    "path": "results/slurm/artifacts/fb15k237_edge_baseline_gcn_3256270_13.train_embeddings.pt",
+    "kind": "tensor",
+    "result_json": "results/slurm/fb15k237_edge_baseline_gcn_3256270_13.json"
+  },
+  {
+    "name": "baseline_sage",
+    "path": "results/slurm/artifacts/fb15k237_edge_baseline_sage_3257008_14.train_embeddings.pt",
+    "kind": "tensor",
+    "result_json": "results/slurm/fb15k237_edge_baseline_sage_3257008_14.json"
+  },
+  {
+    "name": "node2vec",
+    "path": "results/slurm/artifacts/fb15k237_edge_node2vec_3256270_12.train_embeddings.pt",
+    "kind": "tensor",
+    "result_json": "results/slurm/fb15k237_edge_node2vec_3256270_12.json"
+  },
+  {
+    "name": "edge_aware_openai",
+    "path": "results/slurm/artifacts/fb15k237_edge_edge_aware_sage_concat_openai_3257380_15.encoder.pt",
+    "kind": "edge_aware_encoder",
+    "result_json": "results/slurm/fb15k237_edge_edge_aware_sage_concat_openai_3257380_15.json"
+  },
+  {
+    "name": "edge_aware_gemini",
+    "path": "results/slurm/artifacts/fb15k237_edge_edge_aware_sage_concat_gemini_3257380_16.encoder.pt",
+    "kind": "edge_aware_encoder",
+    "result_json": "results/slurm/fb15k237_edge_edge_aware_sage_concat_gemini_3257380_16.json"
+  },
+  {
+    "name": "edge_aware_e5",
+    "path": "results/slurm/artifacts/fb15k237_edge_edge_aware_sage_concat_e5_3257380_17.encoder.pt",
+    "kind": "edge_aware_encoder",
+    "result_json": "results/slurm/fb15k237_edge_edge_aware_sage_concat_e5_3257380_17.json"
+  },
+  {
+    "name": "hgt_edge",
+    "path": "figures/umap/embeddings/hgt_fb15k237_edge.export.pt",
+    "kind": "tensor",
+    "expected_num_nodes": 14541
+  }
+]

@@ -104,6 +104,29 @@ def _orient_query_edges(
     return torch.stack([oriented_src, oriented_dst], dim=0)
 
 
+def _orient_bipartite_query_edges(
+    edge_index: torch.Tensor,
+    *,
+    primary_src_mask: torch.Tensor,
+    primary_dst_mask: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Orient query edges so the endpoint marked primary on its side is favored as ``src``,
+    analogously to :func:`_orient_query_edges` with a single primary mask.
+    """
+    edge_index = edge_index.cpu().long()
+    if edge_index.numel() == 0:
+        return edge_index
+    primary_src_mask = primary_src_mask.cpu().bool()
+    primary_dst_mask = primary_dst_mask.cpu().bool()
+    src = edge_index[0]
+    dst = edge_index[1]
+    swap = (~primary_src_mask[src]) & primary_dst_mask[dst]
+    oriented_src = torch.where(swap, dst, src)
+    oriented_dst = torch.where(swap, src, dst)
+    return torch.stack([oriented_src, oriented_dst], dim=0)
+
+
 def _build_type_to_nodes(node_types: list[str]) -> dict[str, torch.Tensor]:
     buckets: dict[str, list[int]] = {}
     for idx, node_type in enumerate(node_types):
@@ -482,6 +505,114 @@ def create_node_split(
         train_node_mask=train_node_mask,
         val_node_mask=val_node_mask,
         test_node_mask=test_node_mask,
+        train_pos_edge_index=train_pos,
+        val_pos_edge_index=val_pos,
+        test_pos_edge_index=test_pos,
+        val_neg_edge_index=val_neg,
+        test_neg_edge_index=test_neg,
+        negatives_per_pos=negatives_per_pos,
+    )
+
+
+def create_bipartite_node_split(
+    edge_index: torch.Tensor,
+    *,
+    num_src_nodes: int,
+    num_dst_nodes: int,
+    val_ratio: float = 0.15,
+    test_ratio: float = 0.15,
+    seed: int = 42,
+    undirected: bool = False,
+    node_types: list[str] | None = None,
+    negative_sampling_mode: str = "global",
+    negatives_per_pos: int = 20,
+) -> EdgeSplit:
+    """
+    Node-disjoint link split for a bipartite relation (distinct source / destination index spaces).
+
+    Endpoints are partitioned into train/val/test **separately** on the source and destination
+    sides (same logic as :func:`split_node_indices`). Edge sets follow the same priority as
+    :func:`create_node_split`: test if either endpoint is in its side's test set; else val if
+    either endpoint is in val; else train.
+    """
+    if num_src_nodes <= 0 or num_dst_nodes <= 0:
+        raise ValueError("num_src_nodes and num_dst_nodes must be positive for bipartite split")
+
+    train_src_idx, val_src_idx, test_src_idx = split_node_indices(
+        num_src_nodes,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=seed,
+    )
+    train_dst_idx, val_dst_idx, test_dst_idx = split_node_indices(
+        num_dst_nodes,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        seed=seed + 100_003,
+    )
+
+    train_src_mask = torch.zeros(num_src_nodes, dtype=torch.bool)
+    val_src_mask = torch.zeros(num_src_nodes, dtype=torch.bool)
+    test_src_mask = torch.zeros(num_src_nodes, dtype=torch.bool)
+    train_src_mask[train_src_idx] = True
+    val_src_mask[val_src_idx] = True
+    test_src_mask[test_src_idx] = True
+
+    train_dst_mask = torch.zeros(num_dst_nodes, dtype=torch.bool)
+    val_dst_mask = torch.zeros(num_dst_nodes, dtype=torch.bool)
+    test_dst_mask = torch.zeros(num_dst_nodes, dtype=torch.bool)
+    train_dst_mask[train_dst_idx] = True
+    val_dst_mask[val_dst_idx] = True
+    test_dst_mask[test_dst_idx] = True
+
+    pos = _canonicalize_undirected_edges(edge_index) if undirected else edge_index.cpu().long()
+    src, dst = pos[0], pos[1]
+
+    test_edge_mask = test_src_mask[src] | test_dst_mask[dst]
+    val_edge_mask = ~test_edge_mask & (val_src_mask[src] | val_dst_mask[dst])
+    train_edge_mask = ~(test_edge_mask | val_edge_mask)
+
+    train_pos = pos[:, train_edge_mask]
+    val_pos = pos[:, val_edge_mask]
+    test_pos = pos[:, test_edge_mask]
+
+    val_pos = _orient_bipartite_query_edges(
+        val_pos,
+        primary_src_mask=val_src_mask,
+        primary_dst_mask=val_dst_mask,
+    )
+    test_pos = _orient_bipartite_query_edges(
+        test_pos,
+        primary_src_mask=test_src_mask,
+        primary_dst_mask=test_dst_mask,
+    )
+
+    val_neg = sample_query_negative_edges(
+        val_pos,
+        positive_edge_index=pos,
+        num_src_nodes=num_src_nodes,
+        num_dst_nodes=num_dst_nodes,
+        node_types=node_types,
+        negatives_per_pos=negatives_per_pos,
+        mode=negative_sampling_mode,
+        seed=seed + 1,
+        undirected=undirected,
+        bipartite=True,
+    )
+    test_neg = sample_query_negative_edges(
+        test_pos,
+        positive_edge_index=pos,
+        num_src_nodes=num_src_nodes,
+        num_dst_nodes=num_dst_nodes,
+        node_types=node_types,
+        negatives_per_pos=negatives_per_pos,
+        mode=negative_sampling_mode,
+        seed=seed + 2,
+        undirected=undirected,
+        bipartite=True,
+    )
+
+    return EdgeSplit(
         train_pos_edge_index=train_pos,
         val_pos_edge_index=val_pos,
         test_pos_edge_index=test_pos,

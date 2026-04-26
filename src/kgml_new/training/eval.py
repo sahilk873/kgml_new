@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
 from torch import nn
 
@@ -138,13 +139,47 @@ def compute_relation_holdout_metrics(
     }
 
 
+def dot_product_link_logits(
+    z: torch.Tensor,
+    pos_edge_index: torch.Tensor,
+    neg_edge_index: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Dot-product scores used as logits for BCE (same as training supervision)."""
+    pos_logits = (z[pos_edge_index[0]] * z[pos_edge_index[1]]).sum(dim=-1)
+    neg_logits = (z[neg_edge_index[0]] * z[neg_edge_index[1]]).sum(dim=-1)
+    return pos_logits, neg_logits
+
+
+def mean_bce_logits_link_prediction(
+    pos_logits: torch.Tensor,
+    neg_logits: torch.Tensor,
+    *,
+    negatives_per_pos: int | None = None,
+) -> torch.Tensor:
+    """
+    Mean binary cross-entropy with logits over validation positives and negatives.
+
+    ``neg_logits`` may be flat ``[num_pos * K]`` or grouped ``[num_pos, K]``;
+    ``negatives_per_pos`` is unused but kept for API symmetry with callers that
+    reshape negatives explicitly.
+    """
+    del negatives_per_pos
+    pos_logits = pos_logits.reshape(-1).float()
+    neg_logits = neg_logits.reshape(-1).float()
+    logits = torch.cat([pos_logits, neg_logits], dim=0)
+    targets = torch.cat(
+        [torch.ones_like(pos_logits), torch.zeros_like(neg_logits)],
+        dim=0,
+    )
+    return F.binary_cross_entropy_with_logits(logits, targets, reduction="mean")
+
+
 def link_prediction_dot_product(
     z: torch.Tensor,
     pos_edge_index: torch.Tensor,
     neg_edge_index: torch.Tensor,
 ) -> dict[str, float]:
-    pos_scores = (z[pos_edge_index[0]] * z[pos_edge_index[1]]).sum(dim=-1)
-    neg_scores = (z[neg_edge_index[0]] * z[neg_edge_index[1]]).sum(dim=-1)
+    pos_scores, neg_scores = dot_product_link_logits(z, pos_edge_index, neg_edge_index)
     return _binary_metrics_from_scores(pos_scores, neg_scores)
 
 

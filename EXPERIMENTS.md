@@ -56,7 +56,7 @@ Symptoms include: `torch.cuda.is_available()` is false on a GPU node, CUDA kerne
 1. **Wrong node** — venv is fine but the job/login session has no GPU (`nvidia-smi` missing or “no devices”). Run training on a GPU partition and request a GPU.
 2. **CPU-only PyTorch** — `pip install torch` resolved to a CPU wheel. Install the CUDA build your site documents (PyTorch “Start locally” picker: Linux + Pip + your CUDA tag).
 3. **CUDA tag vs driver** — Wheels are labeled `+cu118`, `+cu121`, `+cu124`, `+cu130`, etc. The **NVIDIA driver** on the node must be **new enough** for that PyTorch build (see [PyTorch compatibility](https://pytorch.org/get-started/locally/)). If the driver is too old, install an older `cuXXX` torch, or use a newer driver / different queue.
-4. **PyG extensions out of sync** — After **any** torch reinstall, reinstall `pyg_lib`, `torch_scatter`, and `torch_sparse` from the PyG index that matches `torch.__version__` (same `+cu…` suffix). Mismatch gives import errors or subtle runtime failures.
+4. **PyG extensions out of sync** — After **any** torch reinstall, reinstall `torch_scatter` and `torch_sparse` from the PyG index that matches `torch.__version__` (same `+cu…` suffix). `pyg_lib` is optional and may fail on older glibc (RHEL8); mismatched extensions cause import errors or subtle runtime failures.
 5. **Filesystem / OS mismatch** — A `.venv` copied from another OS or very old `glibc` can load the wrong binaries. Prefer creating the venv on the **same OS family** as the GPU nodes, or use a container/conda stack from the cluster docs.
 
 **What to run (on a GPU node, venv active):**
@@ -143,7 +143,16 @@ Path: `python -m kgml_new.scripts.run_hgt` (or `kgml-new-hgt`)
 
 Same input requirements as the TxGNN runner (typed CSV/TSV or pickled `networkx.Graph`). Uses [Heterogeneous Graph Transformer](https://arxiv.org/abs/2003.01332) layers (`torch_geometric.nn.HGTConv`) plus DistMult scoring—separate implementation from TxGNN. Useful flags: `--num-heads` (default 4), `--num-layers` (default 2), `--dropout`. Channel dimensions are aligned to be divisible by `num_heads`.
 
-Slurm example: `scripts/slurm/run_hgt.slurm`.
+**Neighbor sampling (large graphs):** By default, training and validation/test scoring use PyG `LinkNeighborLoader` mini-batches (`--neighbor-sampling`, on when `torch_sparse` is available—install `torch_scatter` and `torch_sparse` from the PyG wheel index matching your CUDA PyTorch). On older glibc (e.g. RHEL8), skip optional `pyg_lib` if import fails; `torch_sparse` alone is sufficient. Tune `--batch-size`, `--eval-batch-size`, and `--num-neighbors`. Use **`scripts/bootstrap_gpu_venv.sh`** (`RECREATE=1`) for a reproducible `.venv`. Use `--no-neighbor-sampling` only for tiny graphs or when the sampler backend is missing (falls back to full-graph encode and may OOM).
+
+**Splits (link prediction):** `--split-protocol {edge,node}` selects random edge-disjoint vs node-disjoint evaluation (defaults mirror `export_prepared_link_prediction`: `--val-ratio 0.1`, `--test-ratio 0.1`). Typed bipartite relations (e.g. PrimeKG drug–disease) use an internal bipartite node split; same-type relations (typical FB15k-237 entity–entity per predicate) use the homogeneous node split. `--negative-sampling-mode {global,type_matched}` controls val/test negatives (default `global`). Result JSON includes `split_protocol`, `val_ratio`, `test_ratio`, `bipartite_node_split`, and `negative_sampling_mode`.
+
+**FB15k headerless TSV:** pass `--source-col source --relation-col relation --target-col target` (see loader), and `--relation` with the **exact** predicate string in column 2.
+
+Slurm examples:
+
+- Single GPU (default PrimeKG-style `data/kg.csv`): `scripts/slurm/run_hgt.slurm`.
+- PrimeKG + FB15k × edge/node array: `scripts/slurm/hgt_primekg_fb15k_split_array.slurm` (submit via `scripts/slurm/submit_hgt_primekg_fb15k.sh`). Set `HGT_RELATION_FB15K237` before submit.
 
 ## Main Split Protocols
 

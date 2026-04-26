@@ -10,7 +10,10 @@ from torch import nn, Tensor
 from kgml_new.config import LinkMLPConfig
 from kgml_new.io.artifacts import torch_load_checkpoint, torch_save_checkpoint
 from kgml_new.models.link_mlp import LinkPredictionMLP
-from kgml_new.training.eval import link_prediction_mlp_torch
+from kgml_new.training.eval import (
+    grouped_link_prediction_metrics,
+    mean_bce_logits_link_prediction,
+)
 from kgml_new.training.history import TrainingHistory
 
 
@@ -132,11 +135,11 @@ def train_link_mlp_with_validation(
     val_pos_edge_index: Tensor | None = None,
     val_neg_edge_index: Tensor | None = None,
 ) -> tuple[LinkPredictionMLP, int, TrainingHistory]:
-    """Train MLP for link prediction with proper train/eval separation.
-    
-    FIXED: Only evaluate validation metrics periodically (every 10 epochs) to avoid
-    data leakage from evaluating on the same training embeddings during every epoch.
-    Uses multiple negative samples per positive edge for balanced training.
+    """Train MLP with frozen node embeddings ``z`` and validation on held-out edges.
+
+    Each epoch records ``train_loss``; when validation edges are supplied, also records
+    ``val_loss`` (mean BCE on logits), ``val_auc``, and ``val_ap``. Early stopping keys
+    off validation AUC stepwise updates to the LR scheduler each validation epoch.
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -235,38 +238,43 @@ def train_link_mlp_with_validation(
         history.learning_rate.append(optimizer.param_groups[0]["lr"])
         history.batch_count.append(num_batches)
 
-        val_auc, val_ap = None, None
-        if val_pos_edge_index is not None and val_neg_edge_index is not None and epoch % 10 == 0:
+        val_auc, val_ap, val_loss = None, None, None
+        if val_pos_edge_index is not None and val_neg_edge_index is not None:
+            model.eval()
             with torch.inference_mode():
-                metrics = link_prediction_mlp_torch(
-                    model, val_pos_edge_index, val_neg_edge_index, z
-                )
-            val_auc = metrics["roc_auc"]
-            val_ap = metrics["average_precision"]
+                pos_src = val_pos_edge_index[0]
+                pos_dst = val_pos_edge_index[1]
+                neg_src = val_neg_edge_index[0]
+                neg_dst = val_neg_edge_index[1]
+                pos_logit = model(z[pos_src], z[pos_dst])
+                neg_logit = model(z[neg_src], z[neg_dst])
+            val_loss = float(
+                mean_bce_logits_link_prediction(pos_logit, neg_logit)
+            )
+            metrics = grouped_link_prediction_metrics(
+                pos_logit.detach(), neg_logit.detach()
+            )
+            val_auc = float(metrics["roc_auc"])
+            val_ap = float(metrics["average_precision"])
+            history.val_loss.append(val_loss)
             history.val_auc.append(val_auc)
             history.val_ap.append(val_ap)
             scheduler.step(val_auc)
-            
+
             if val_auc > best_val_auc:
                 best_val_auc = val_auc
                 patience_counter = 0
             else:
                 patience_counter += 1
-        
-        if val_auc is None and len(history.val_auc) > 0:
-            history.val_auc.append(float("nan"))
-            history.val_ap.append(float("nan"))
 
         if epoch % 10 == 0 or epoch == config.epochs - 1:
-            val_str = (
-                f" val_auc={val_auc:.4f} val_ap={val_ap:.4f}"
-                if val_auc is not None and val_ap is not None
-                else ""
-            )
+            val_str = ""
+            if val_auc is not None and val_ap is not None:
+                val_str = f" val_auc={val_auc:.4f} val_ap={val_ap:.4f}"
+            if val_loss is not None:
+                val_str = f"{val_str} val_loss={val_loss:.4f}".strip()
             lr_str = f" lr={optimizer.param_groups[0]['lr']:.2e}"
-            print(
-                f"MLP epoch {epoch:04d} loss={avg_loss:.4f}{val_str}{lr_str}"
-            )
+            print(f"MLP epoch {epoch:04d} loss={avg_loss:.4f}{val_str}{lr_str}")
 
         if ckpt_path is not None and save_every_epochs > 0:
             if (epoch + 1) % save_every_epochs == 0 or epoch == config.epochs - 1:

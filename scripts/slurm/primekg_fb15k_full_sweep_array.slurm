@@ -43,7 +43,7 @@ DECODER="${DECODER:-dot}"
 NEGATIVES_PER_POS="${NEGATIVES_PER_POS:-20}"
 EPOCHS="${EPOCHS:-100}"
 
-PRIMEKG_INPUT="${PRIMEKG_INPUT:-${REPO}/data/kg.csv}"
+PRIMEKG_INPUT="${PRIMEKG_INPUT:-${REPO}/data/primekg.tsv}"
 FB15K237_INPUT="${FB15K237_INPUT:-${REPO}/data/fb15k-237/fb15k-237.tsv}"
 PRIMEKG_OPENAI_REL_CACHE="${PRIMEKG_OPENAI_REL_CACHE:-${OPENAI_REL_CACHE:-cache/primekg-relations-openai.pt}}"
 PRIMEKG_GEMINI_REL_CACHE="${PRIMEKG_GEMINI_REL_CACHE:-${GEMINI_REL_CACHE:-cache/primekg-relations-gemini.pt}}"
@@ -149,6 +149,10 @@ case "${RUN_SPEC}" in
   node2vec)
     RUN_NAME="node2vec"
     METHOD_ARGS=(--method node2vec)
+    # Prepared caches (--prepared-dataset-cache) contain the full graph built at cache time.
+    # Do not pass --max-edges here: it only applies to CSV loads and incorrectly broke cache
+    # validation (meta mismatch). For a CSV-only PrimeKG node2vec cap, set MAX_EDGES and run
+    # without a prepared cache in a dedicated script.
     ;;
   baseline_gcn)
     RUN_NAME="baseline_gcn"

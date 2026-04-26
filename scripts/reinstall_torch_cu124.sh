@@ -28,11 +28,17 @@ echo "Installed torch ${TORCH_VER}"
 
 PYG_URL="https://data.pyg.org/whl/torch-${TORCH_VER}.html"
 echo "Installing PyG binaries from ${PYG_URL}"
-pip install pyg_lib torch_scatter torch_sparse -f "${PYG_URL}"
+pip install torch_scatter torch_sparse -f "${PYG_URL}"
+if [[ "${INSTALL_PYG_LIB:-0}" == "1" ]]; then
+  pip install pyg_lib -f "${PYG_URL}" || {
+    echo "WARNING: pyg_lib install failed (likely old glibc); continuing with torch_sparse backend." >&2
+  }
+fi
 echo ""
-echo "If imports fail with GLIBC_2.29 on RHEL/Rocky 8, rebuild pyg-lib from source:"
+echo "If imports fail with GLIBC_2.29 on RHEL/Rocky 8, keep pyg_lib uninstalled or build from source:"
 echo "  module load GCCcore/12.2.0 CUDA/12.2.0   # GCC major must be <=12 for CUDA 12.2 nvcc"
 echo "  source .venv/bin/activate && ./scripts/install_pyg_extensions_el8.sh"
+echo "By default this script now installs torch_scatter + torch_sparse only (enough for LinkNeighborLoader)."
 
 python - <<'PY'
 import torch

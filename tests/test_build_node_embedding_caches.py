@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import torch
 
 from kgml_new.scripts import build_node_embedding_caches as script
@@ -121,6 +122,7 @@ def test_build_node_embedding_caches_smoke(tmp_path: Path, monkeypatch):
             path = out_dir / f"{dataset}-node-embeddings-{model}.pt"
             assert path.is_file()
             payload = torch.load(path)
+            assert payload["format_version"] == script.NODE_CACHE_FORMAT_VERSION
             assert payload["artifact_type"] == "node_embeddings"
             assert payload["embedding_model"] == model
             assert payload["node_text_mode"] == "human_readable_id_plus_type"
@@ -133,3 +135,90 @@ def test_build_node_embedding_caches_smoke(tmp_path: Path, monkeypatch):
             assert len(payload["node_ids"]) == payload["num_nodes"]
             assert len(payload["node_types"]) == payload["num_nodes"]
             assert len(payload["node_texts"]) == payload["num_nodes"]
+            partial = path.with_suffix(".partial.pt")
+            assert not partial.exists()
+
+
+def test_resume_from_partial_checkpoint(tmp_path: Path, monkeypatch):
+    """Crash after first batch; second run completes and removes partial."""
+    drkg_path = tmp_path / "drkg.tsv"
+    drkg_path.write_text(
+        "A\trel\tB\n"
+        "C\trel\tD\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(
+        script.DEFAULT_DATASETS,
+        "drkg",
+        script.DatasetSpec(
+            name="drkg",
+            input_path=drkg_path,
+            input_format="tsv",
+            source_col="source",
+            target_col="target",
+            source_type_col=None,
+            target_type_col=None,
+            has_header=False,
+        ),
+    )
+
+    calls: list[int] = []
+
+    def flaky_openai(texts: list[str], model_name: str) -> list[list[float]]:
+        calls.append(len(texts))
+        if len(calls) >= 2:
+            raise RuntimeError("simulated crash after first checkpoint")
+        return _fake_vectors(texts, dim=3)
+
+    monkeypatch.setattr(script, "_embed_openai", flaky_openai)
+
+    out_dir = tmp_path / "cache"
+    args_fail = script.parse_args(
+        [
+            "--output-dir",
+            str(out_dir),
+            "--datasets",
+            "drkg",
+            "--embedding-models",
+            "openai",
+            "--openai-batch-size",
+            "2",
+            "--overwrite",
+        ]
+    )
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        script.run(args_fail)
+
+    partial = out_dir / "drkg-node-embeddings-openai.partial.pt"
+    assert partial.is_file()
+    chk = torch.load(partial)
+    assert chk["artifact_type"] == "node_embeddings_partial"
+    assert chk["completed_rows"] == 2
+
+    monkeypatch.setattr(
+        script,
+        "_embed_openai",
+        lambda texts, model_name: _fake_vectors(texts, dim=3),
+    )
+
+    args_ok = script.parse_args(
+        [
+            "--output-dir",
+            str(out_dir),
+            "--datasets",
+            "drkg",
+            "--embedding-models",
+            "openai",
+            "--openai-batch-size",
+            "2",
+            "--no-overwrite",
+        ]
+    )
+    written = script.run(args_ok)
+    assert len(written) == 1
+    final = out_dir / "drkg-node-embeddings-openai.pt"
+    assert final.is_file()
+    assert not partial.exists()
+    payload = torch.load(final)
+    assert payload["num_nodes"] == 4
+    assert payload["embeddings"].shape == (4, 3)

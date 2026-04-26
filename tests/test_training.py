@@ -162,6 +162,7 @@ def test_train_unsupervised_fullgraph_with_validation_smoke(tmp_path):
     assert len(history.train_loss) == 2
     assert len(history.val_auc) == 2
     assert len(history.val_ap) == 2
+    assert len(history.val_loss) == 2
     assert history_path.exists()
 
 
@@ -215,6 +216,7 @@ def test_train_unsupervised_edge_aware_with_validation_smoke(edge_relation_mode)
 
     assert last_epoch == 1
     assert len(history.val_auc) == 2
+    assert len(history.val_loss) == 2
 
 
 def test_train_unsupervised_batched_with_validation_smoke():
@@ -246,3 +248,4 @@ def test_train_unsupervised_batched_with_validation_smoke():
     assert last_epoch == 0
     assert history.epoch == [0]
     assert len(history.train_loss) == 1
+    assert len(history.val_loss) == 1

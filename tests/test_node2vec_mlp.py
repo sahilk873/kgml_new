@@ -66,6 +66,7 @@ def test_node2vec_train_with_validation_smoke():
     assert history.epoch == [0]
     assert len(history.val_auc) == 1
     assert len(history.val_ap) == 1
+    assert len(history.val_loss) == 1
 
 
 def test_train_link_mlp_smoke():
@@ -140,5 +141,6 @@ def test_train_link_mlp_with_validation_smoke():
     assert history.epoch == [0]
     assert len(history.train_loss) == 1
     assert len(history.val_auc) == 1
+    assert len(history.val_loss) == 1
     metrics = link_prediction_mlp_torch(mlp, val_pos, val_neg, z)
     assert "roc_auc" in metrics

@@ -285,6 +285,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
+        "--save-model-artifacts",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Save model weights / optional embeddings next to run outputs.",
+    )
+    parser.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        default=None,
+        help="Directory for model artifacts (default: <output_parent>/artifacts).",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default=None,
@@ -561,7 +573,10 @@ def _expected_prepared_cache_meta(args: argparse.Namespace) -> dict:
         "decoder": args.decoder,
         "shuffle_relations": args.shuffle_relations,
         "add_self_loops": False,
-        "max_edges": args.max_edges,
+        # Do not validate max_edges against the pickle: the cache was built with the
+        # graph already materialized (meta.max_edges records CSV truncation at build time).
+        # CLI --max-edges only affects CSV loads; passing it alongside --prepared-dataset-cache
+        # must not invalidate an otherwise matching cache.
         "negative_sampling_mode_resolved": neg_resolved,
         "negative_sampling_mode_cli": args.negative_sampling_mode,
         "resolved_input_format": rf,
@@ -579,10 +594,73 @@ def history_dict(history) -> dict:
     return {
         "epoch": history.epoch,
         "train_loss": history.train_loss,
+        "learning_rate": history.learning_rate,
+        "val_loss": history.val_loss,
         "val_auc": history.val_auc,
         "val_ap": history.val_ap,
         "batch_count": history.batch_count,
     }
+
+
+def _save_run_artifacts(
+    *,
+    args: argparse.Namespace,
+    output: dict,
+    encoder_model: torch.nn.Module | None = None,
+    decoder_model: torch.nn.Module | None = None,
+    embeddings: torch.Tensor | None = None,
+    extra_tensors: dict[str, torch.Tensor] | None = None,
+) -> None:
+    if not getattr(args, "save_model_artifacts", True):
+        output["artifacts"] = {"enabled": False}
+        return
+    root = (
+        Path(args.artifacts_dir)
+        if args.artifacts_dir is not None
+        else args.output.parent / "artifacts"
+    )
+    root.mkdir(parents=True, exist_ok=True)
+    stem = args.output.stem
+    artifacts: dict[str, object] = {"enabled": True, "root": str(root)}
+
+    if encoder_model is not None:
+        encoder_path = root / f"{stem}.encoder.pt"
+        torch.save(
+            {
+                "method": args.method,
+                "model_class": encoder_model.__class__.__name__,
+                "state_dict": encoder_model.state_dict(),
+            },
+            encoder_path,
+        )
+        artifacts["encoder_state_dict"] = str(encoder_path)
+
+    if decoder_model is not None:
+        decoder_path = root / f"{stem}.decoder.pt"
+        torch.save(
+            {
+                "method": args.method,
+                "decoder_class": decoder_model.__class__.__name__,
+                "state_dict": decoder_model.state_dict(),
+            },
+            decoder_path,
+        )
+        artifacts["decoder_state_dict"] = str(decoder_path)
+
+    if embeddings is not None:
+        emb_path = root / f"{stem}.train_embeddings.pt"
+        torch.save(embeddings.detach().cpu(), emb_path)
+        artifacts["train_embeddings"] = str(emb_path)
+
+    if extra_tensors:
+        extra_paths: dict[str, str] = {}
+        for key, tensor in extra_tensors.items():
+            p = root / f"{stem}.{key}.pt"
+            torch.save(tensor.detach().cpu(), p)
+            extra_paths[key] = str(p)
+        artifacts["extra_tensors"] = extra_paths
+
+    output["artifacts"] = artifacts
 
 
 def _resolved_embedding_model(args: argparse.Namespace) -> str:
@@ -761,6 +839,8 @@ def maybe_train_decoder(
     epochs: int,
     device: torch.device,
     run_args: argparse.Namespace,
+    val_pos_edge_index: torch.Tensor | None = None,
+    val_neg_edge_index: torch.Tensor | None = None,
 ):
     if decoder == "dot":
         return None, None, None
@@ -770,6 +850,8 @@ def maybe_train_decoder(
         train_pos,
         mlp_cfg,
         device=device,
+        val_pos_edge_index=val_pos_edge_index,
+        val_neg_edge_index=val_neg_edge_index,
     )
     return decoder_model, decoder_last_epoch, decoder_history
 
@@ -1095,6 +1177,8 @@ def run_gpu_method_experiment(
             cfg,
             device=device,
             edge_aware=False,
+            val_pos_edge_index=val_pos,
+            val_neg_edge_index=val_neg,
         )
         _LOG.info("phase=train_done last_epoch=%s", last_epoch)
         z = compute_node_embeddings(model, train_data, device, edge_aware=False)
@@ -1105,11 +1189,13 @@ def run_gpu_method_experiment(
             epochs=args.epochs,
             device=device,
             run_args=args,
+            val_pos_edge_index=val_pos,
+            val_neg_edge_index=val_neg,
         )
         _LOG.info("phase=eval_val (baseline_sage)")
         val_metrics = evaluate_inductive_link_prediction(
             model,
-            dataset.full_data,
+            dataset.train_data,
             pos_edge_index=val_pos,
             neg_edge_index=val_neg,
             negatives_per_pos=dataset.negatives_per_pos,
@@ -1124,7 +1210,7 @@ def run_gpu_method_experiment(
         _LOG.info("phase=eval_test (baseline_sage)")
         test_metrics = evaluate_inductive_link_prediction(
             model,
-            dataset.full_data,
+            dataset.train_data,
             pos_edge_index=test_pos,
             neg_edge_index=test_neg,
             negatives_per_pos=dataset.negatives_per_pos,
@@ -1153,6 +1239,13 @@ def run_gpu_method_experiment(
             val_neg=val_neg,
             test_pos=test_pos,
             test_neg=test_neg,
+        )
+        _save_run_artifacts(
+            args=args,
+            output=output,
+            encoder_model=model,
+            decoder_model=decoder_model,
+            embeddings=z,
         )
 
     elif args.method == "baseline_gcn":
@@ -1171,6 +1264,8 @@ def run_gpu_method_experiment(
             cfg,
             device=device,
             edge_aware=False,
+            val_pos_edge_index=val_pos,
+            val_neg_edge_index=val_neg,
         )
         z = compute_node_embeddings(model, train_data, device, edge_aware=False)
         decoder_model, decoder_last_epoch, decoder_history = maybe_train_decoder(
@@ -1180,10 +1275,12 @@ def run_gpu_method_experiment(
             epochs=args.epochs,
             device=device,
             run_args=args,
+            val_pos_edge_index=val_pos,
+            val_neg_edge_index=val_neg,
         )
         val_metrics = evaluate_inductive_link_prediction(
             model,
-            dataset.full_data,
+            dataset.train_data,
             pos_edge_index=val_pos,
             neg_edge_index=val_neg,
             negatives_per_pos=dataset.negatives_per_pos,
@@ -1197,7 +1294,7 @@ def run_gpu_method_experiment(
         )
         test_metrics = evaluate_inductive_link_prediction(
             model,
-            dataset.full_data,
+            dataset.train_data,
             pos_edge_index=test_pos,
             neg_edge_index=test_neg,
             negatives_per_pos=dataset.negatives_per_pos,
@@ -1226,6 +1323,13 @@ def run_gpu_method_experiment(
             val_neg=val_neg,
             test_pos=test_pos,
             test_neg=test_neg,
+        )
+        _save_run_artifacts(
+            args=args,
+            output=output,
+            encoder_model=model,
+            decoder_model=decoder_model,
+            embeddings=z,
         )
 
     elif args.method == "edge_aware_sage":
@@ -1270,21 +1374,31 @@ def run_gpu_method_experiment(
             edge_attr_for_alignment=train_data.edge_attr,
             alignment_train_pos_edge_index=train_pos,
             alignment_train_pos_edge_attr=dataset.train_pos_edge_attr,
+            val_pos_edge_index=val_pos,
+            val_neg_edge_index=val_neg,
         )
         _LOG.info("phase=train_done last_epoch=%s", last_epoch)
-        z = compute_node_embeddings(model, train_data, device, edge_aware=True)
-        decoder_model, decoder_last_epoch, decoder_history = maybe_train_decoder(
-            decoder=args.decoder,
-            z=z,
-            train_pos=train_pos,
-            epochs=args.epochs,
-            device=device,
-            run_args=args,
-        )
+        # Dot-product decoding does not need explicit full-graph embeddings here:
+        # evaluation calls evaluate_inductive_link_prediction() directly on the model.
+        # Skipping this avoids a large post-train full-graph forward OOM on PrimeKG.
+        z = None
+        decoder_model, decoder_last_epoch, decoder_history = None, None, None
+        if args.decoder != "dot":
+            z = compute_node_embeddings(model, train_data, device, edge_aware=True)
+            decoder_model, decoder_last_epoch, decoder_history = maybe_train_decoder(
+                decoder=args.decoder,
+                z=z,
+                train_pos=train_pos,
+                epochs=args.epochs,
+                device=device,
+                run_args=args,
+                val_pos_edge_index=val_pos,
+                val_neg_edge_index=val_neg,
+            )
         _LOG.info("phase=eval_val (edge_aware_sage)")
         val_metrics = evaluate_inductive_link_prediction(
             model,
-            dataset.full_data,
+            dataset.train_data,
             pos_edge_index=val_pos,
             neg_edge_index=val_neg,
             negatives_per_pos=dataset.negatives_per_pos,
@@ -1299,7 +1413,7 @@ def run_gpu_method_experiment(
         _LOG.info("phase=eval_test (edge_aware_sage)")
         test_metrics = evaluate_inductive_link_prediction(
             model,
-            dataset.full_data,
+            dataset.train_data,
             pos_edge_index=test_pos,
             neg_edge_index=test_neg,
             negatives_per_pos=dataset.negatives_per_pos,
@@ -1311,7 +1425,10 @@ def run_gpu_method_experiment(
             query_buckets=test_query_buckets,
             return_scores=return_scores,
         )
-        output["train_embedding_shape"] = list(z.shape)
+        if z is not None:
+            output["train_embedding_shape"] = list(z.shape)
+        else:
+            output["train_embedding_shape"] = [int(train_data.num_nodes), int(cfg.out_dim)]
         output["relation_init"] = relation_init
         output["last_epoch"] = last_epoch
         output["history"] = history_dict(history)
@@ -1329,6 +1446,14 @@ def run_gpu_method_experiment(
             val_neg=val_neg,
             test_pos=test_pos,
             test_neg=test_neg,
+        )
+        _save_run_artifacts(
+            args=args,
+            output=output,
+            encoder_model=model,
+            decoder_model=decoder_model,
+            embeddings=z,
+            extra_tensors={"relation_table": relation_table},
         )
 
     elif args.method == "edge_aware_sage_node_emb":
@@ -1389,21 +1514,31 @@ def run_gpu_method_experiment(
             edge_attr_for_alignment=train_data.edge_attr,
             alignment_train_pos_edge_index=train_pos,
             alignment_train_pos_edge_attr=dataset.train_pos_edge_attr,
+            val_pos_edge_index=val_pos,
+            val_neg_edge_index=val_neg,
         )
         _LOG.info("phase=train_done last_epoch=%s", last_epoch)
-        z = compute_node_embeddings(model, train_data, device, edge_aware=True)
-        decoder_model, decoder_last_epoch, decoder_history = maybe_train_decoder(
-            decoder=args.decoder,
-            z=z,
-            train_pos=train_pos,
-            epochs=args.epochs,
-            device=device,
-            run_args=args,
-        )
+        # Dot-product decoding does not need explicit full-graph embeddings here:
+        # evaluation calls evaluate_inductive_link_prediction() directly on the model.
+        # Skipping this avoids a large post-train full-graph forward OOM on PrimeKG.
+        z = None
+        decoder_model, decoder_last_epoch, decoder_history = None, None, None
+        if args.decoder != "dot":
+            z = compute_node_embeddings(model, train_data, device, edge_aware=True)
+            decoder_model, decoder_last_epoch, decoder_history = maybe_train_decoder(
+                decoder=args.decoder,
+                z=z,
+                train_pos=train_pos,
+                epochs=args.epochs,
+                device=device,
+                run_args=args,
+                val_pos_edge_index=val_pos,
+                val_neg_edge_index=val_neg,
+            )
         _LOG.info("phase=eval_val (edge_aware_sage_node_emb)")
         val_metrics = evaluate_inductive_link_prediction(
             model,
-            dataset.full_data,
+            dataset.train_data,
             pos_edge_index=val_pos,
             neg_edge_index=val_neg,
             negatives_per_pos=dataset.negatives_per_pos,
@@ -1418,7 +1553,7 @@ def run_gpu_method_experiment(
         _LOG.info("phase=eval_test (edge_aware_sage_node_emb)")
         test_metrics = evaluate_inductive_link_prediction(
             model,
-            dataset.full_data,
+            dataset.train_data,
             pos_edge_index=test_pos,
             neg_edge_index=test_neg,
             negatives_per_pos=dataset.negatives_per_pos,
@@ -1430,7 +1565,10 @@ def run_gpu_method_experiment(
             query_buckets=test_query_buckets,
             return_scores=return_scores,
         )
-        output["train_embedding_shape"] = list(z.shape)
+        if z is not None:
+            output["train_embedding_shape"] = list(z.shape)
+        else:
+            output["train_embedding_shape"] = [int(train_data.num_nodes), int(cfg.out_dim)]
         output["relation_init"] = relation_init
         output["node_embedding_dim"] = node_dim
         output["last_epoch"] = last_epoch
@@ -1449,6 +1587,14 @@ def run_gpu_method_experiment(
             val_neg=val_neg,
             test_pos=test_pos,
             test_neg=test_neg,
+        )
+        _save_run_artifacts(
+            args=args,
+            output=output,
+            encoder_model=model,
+            decoder_model=decoder_model,
+            embeddings=z,
+            extra_tensors={"relation_table": relation_table},
         )
 
     elif args.method == "edge_aware_sage_film_semdec":
@@ -1521,14 +1667,16 @@ def run_gpu_method_experiment(
             alignment_train_pos_edge_attr=dataset.train_pos_edge_attr,
             relation_decode_bundle=model,
             train_uv_relation_lookup=train_uv_relation,
-            metric_eval_data=dataset.full_data,
+            metric_eval_data=dataset.train_data,
+            val_pos_edge_index=val_pos,
+            val_neg_edge_index=val_neg,
         )
         _LOG.info("phase=train_done last_epoch=%s", last_epoch)
         z = compute_node_embeddings(model, train_data, device, edge_aware=True)
         _LOG.info("phase=eval_val (edge_aware_sage_film_semdec)")
         val_metrics = evaluate_inductive_link_prediction(
             model,
-            dataset.full_data,
+            dataset.train_data,
             pos_edge_index=val_pos,
             neg_edge_index=val_neg,
             negatives_per_pos=dataset.negatives_per_pos,
@@ -1544,7 +1692,7 @@ def run_gpu_method_experiment(
         _LOG.info("phase=eval_test (edge_aware_sage_film_semdec)")
         test_metrics = evaluate_inductive_link_prediction(
             model,
-            dataset.full_data,
+            dataset.train_data,
             pos_edge_index=test_pos,
             neg_edge_index=test_neg,
             negatives_per_pos=dataset.negatives_per_pos,
@@ -1582,6 +1730,8 @@ def run_gpu_method_experiment(
             train_data,
             cfg,
             device=device,
+            val_pos_edge_index=val_pos,
+            val_neg_edge_index=val_neg,
         )
         output["train_embedding_shape"] = list(z.shape)
         output["last_epoch"] = last_epoch
@@ -1607,6 +1757,11 @@ def run_gpu_method_experiment(
                 "use baseline_sage, edge_aware_sage, edge_aware_sage_node_emb, "
                 "edge_aware_sage_film_semdec, link_mlp, or edge_aware_link_mlp."
             )
+        _save_run_artifacts(
+            args=args,
+            output=output,
+            embeddings=z,
+        )
 
     elif args.method == "link_mlp":
         base_cfg = train_config_from_run_gpu_method_args(args)
@@ -1625,6 +1780,8 @@ def run_gpu_method_experiment(
             base_cfg,
             device=device,
             edge_aware=False,
+            val_pos_edge_index=val_pos,
+            val_neg_edge_index=val_neg,
         )
         z = compute_node_embeddings(
             base_model, train_data, device, edge_aware=False
@@ -1635,6 +1792,8 @@ def run_gpu_method_experiment(
             train_pos,
             mlp_cfg,
             device=device,
+            val_pos_edge_index=val_pos,
+            val_neg_edge_index=val_neg,
         )
         output["train_embedding_shape"] = list(z.shape)
         output["last_epoch"] = last_epoch
@@ -1643,7 +1802,7 @@ def run_gpu_method_experiment(
         output["base_last_epoch"] = base_last_epoch
         val_metrics = evaluate_inductive_link_prediction(
             base_model,
-            dataset.full_data,
+            dataset.train_data,
             pos_edge_index=val_pos,
             neg_edge_index=val_neg,
             negatives_per_pos=dataset.negatives_per_pos,
@@ -1657,7 +1816,7 @@ def run_gpu_method_experiment(
         )
         test_metrics = evaluate_inductive_link_prediction(
             base_model,
-            dataset.full_data,
+            dataset.train_data,
             pos_edge_index=test_pos,
             neg_edge_index=test_neg,
             negatives_per_pos=dataset.negatives_per_pos,
@@ -1680,6 +1839,13 @@ def run_gpu_method_experiment(
             val_neg=val_neg,
             test_pos=test_pos,
             test_neg=test_neg,
+        )
+        _save_run_artifacts(
+            args=args,
+            output=output,
+            encoder_model=base_model,
+            decoder_model=mlp,
+            embeddings=z,
         )
 
     else:
@@ -1714,6 +1880,8 @@ def run_gpu_method_experiment(
             edge_attr_for_alignment=train_data.edge_attr,
             alignment_train_pos_edge_index=train_pos,
             alignment_train_pos_edge_attr=dataset.train_pos_edge_attr,
+            val_pos_edge_index=val_pos,
+            val_neg_edge_index=val_neg,
         )
         z = compute_node_embeddings(
             base_model, train_data, device, edge_aware=True
@@ -1724,6 +1892,8 @@ def run_gpu_method_experiment(
             train_pos,
             mlp_cfg,
             device=device,
+            val_pos_edge_index=val_pos,
+            val_neg_edge_index=val_neg,
         )
         output["train_embedding_shape"] = list(z.shape)
         output["relation_init"] = relation_init
@@ -1733,7 +1903,7 @@ def run_gpu_method_experiment(
         output["base_last_epoch"] = base_last_epoch
         val_metrics = evaluate_inductive_link_prediction(
             base_model,
-            dataset.full_data,
+            dataset.train_data,
             pos_edge_index=val_pos,
             neg_edge_index=val_neg,
             negatives_per_pos=dataset.negatives_per_pos,
@@ -1747,7 +1917,7 @@ def run_gpu_method_experiment(
         )
         test_metrics = evaluate_inductive_link_prediction(
             base_model,
-            dataset.full_data,
+            dataset.train_data,
             pos_edge_index=test_pos,
             neg_edge_index=test_neg,
             negatives_per_pos=dataset.negatives_per_pos,
@@ -1770,6 +1940,14 @@ def run_gpu_method_experiment(
             val_neg=val_neg,
             test_pos=test_pos,
             test_neg=test_neg,
+        )
+        _save_run_artifacts(
+            args=args,
+            output=output,
+            encoder_model=base_model,
+            decoder_model=mlp,
+            embeddings=z,
+            extra_tensors={"relation_table": relation_table},
         )
 
     return output
@@ -1811,6 +1989,11 @@ def main() -> None:
         if not pcache.is_file():
             raise SystemExit(f"Prepared dataset cache not found: {pcache}")
         _LOG.info("phase=data source=prepared_dataset_cache path=%s", pcache)
+        if args.max_edges is not None:
+            _LOG.info(
+                "phase=data note=prepared_dataset_cache ignores --max-edges=%s (graph comes from pickle)",
+                args.max_edges,
+            )
         dataset, _ = load_prepared_link_prediction_dataset(
             pcache,
             expected_meta=_expected_prepared_cache_meta(args),

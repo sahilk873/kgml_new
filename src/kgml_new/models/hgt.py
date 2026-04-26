@@ -89,7 +89,13 @@ class HGTLinkPredictor(nn.Module):
 
     @staticmethod
     def _etype_key(etype: tuple[str, str, str]) -> str:
-        return f"{etype[0]}__{etype[1]}__{etype[2]}"
+        """
+        Stable key for :class:`nn.ParameterDict`. PyTorch forbids ``.`` in parameter
+        names; Freebase-style relations like ``/people/person/profession`` must be
+        sanitized.
+        """
+        raw = f"{etype[0]}__{etype[1]}__{etype[2]}"
+        return raw.replace(".", "_DOT_")
 
     def encode(self, data: HeteroData) -> dict[str, torch.Tensor]:
         x_dict = {k: self.input_linears[k](v.x) for k, v in data.node_items()}

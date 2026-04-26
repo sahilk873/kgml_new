@@ -157,6 +157,7 @@ def run_txgnn_experiment(
         "evaluation_protocol": "train-only relation graph with reverse edges updated; held-out val/test positives; true sampled bipartite non-edge negatives",
         "history": {
             "train_loss": history.train_loss,
+            "val_loss": history.val_loss,
             "val_auc": history.val_auc,
             "val_ap": history.val_ap,
         },

@@ -237,8 +237,10 @@ def _train_unsupervised_fullgraph(
 ) -> tuple[nn.Module, int, TrainingHistory]:
     """Full-graph training (no neighbor sampling) with history tracking."""
     from kgml_new.training.eval import (
+        dot_product_link_logits,
         evaluate_inductive_link_prediction,
         link_prediction_dot_product,
+        mean_bce_logits_link_prediction,
     )
     from kgml_new.training.relation_decode_batch import relation_ids_for_uv_pairs
 
@@ -369,7 +371,7 @@ def _train_unsupervised_fullgraph(
         history.learning_rate.append(config.learning_rate)
         history.batch_count.append(num_batches)
 
-        val_auc, val_ap = None, None
+        val_auc, val_ap, val_loss = None, None, None
         if val_pos_edge_index is not None and val_neg_edge_index is not None:
             if (
                 relation_decode_bundle is not None
@@ -388,17 +390,26 @@ def _train_unsupervised_fullgraph(
                     decoder_model=None,
                     batch_size=int(config.batch_size),
                     rel_decode_bundle=relation_decode_bundle,
+                    return_scores=True,
                 )
+                pos_s = torch.from_numpy(metrics["pos_scores"]).float()
+                neg_s = torch.from_numpy(metrics["neg_scores"]).float()
+                val_loss = float(mean_bce_logits_link_prediction(pos_s, neg_s))
             else:
                 with torch.inference_mode():
                     z_eval = _encode(model, data, device, edge_aware)
                 metrics = link_prediction_dot_product(
                     z_eval, val_pos_edge_index, val_neg_edge_index
                 )
+                pos_l, neg_l = dot_product_link_logits(
+                    z_eval, val_pos_edge_index, val_neg_edge_index
+                )
+                val_loss = float(mean_bce_logits_link_prediction(pos_l, neg_l))
             val_auc = metrics["roc_auc"]
             val_ap = metrics["average_precision"]
             history.val_auc.append(val_auc)
             history.val_ap.append(val_ap)
+            history.val_loss.append(val_loss)
 
         if epoch % 10 == 0 or epoch == config.epochs - 1:
             val_str = (
@@ -406,6 +417,8 @@ def _train_unsupervised_fullgraph(
                 if val_auc is not None and val_ap is not None
                 else ""
             )
+            if val_loss is not None:
+                val_str = f"{val_str} val_loss={val_loss:.4f}".strip()
             _LOG.info(
                 "epoch %04d loss=%.4f%s device=%s",
                 epoch,
@@ -459,8 +472,10 @@ def _train_unsupervised_batched(
     Uses mini-batch neighbor sampling to scale to millions of edges.
     """
     from kgml_new.training.eval import (
+        dot_product_link_logits,
         evaluate_inductive_link_prediction,
         link_prediction_dot_product,
+        mean_bce_logits_link_prediction,
     )
     from torch_geometric.loader import LinkNeighborLoader
     from torch_geometric.typing import WITH_PYG_LIB, WITH_TORCH_SPARSE
@@ -643,7 +658,7 @@ def _train_unsupervised_batched(
         history.learning_rate.append(config.learning_rate)
         history.batch_count.append(num_batches)
 
-        val_auc, val_ap = None, None
+        val_auc, val_ap, val_loss = None, None, None
         if val_pos_edge_index is not None and val_neg_edge_index is not None:
             if (
                 relation_decode_bundle is not None
@@ -662,17 +677,26 @@ def _train_unsupervised_batched(
                     decoder_model=None,
                     batch_size=int(config.batch_size),
                     rel_decode_bundle=relation_decode_bundle,
+                    return_scores=True,
                 )
+                pos_s = torch.from_numpy(metrics["pos_scores"]).float()
+                neg_s = torch.from_numpy(metrics["neg_scores"]).float()
+                val_loss = float(mean_bce_logits_link_prediction(pos_s, neg_s))
             else:
                 with torch.inference_mode():
                     z_eval = _encode(model, data, device, edge_aware)
                 metrics = link_prediction_dot_product(
                     z_eval, val_pos_edge_index, val_neg_edge_index
                 )
+                pos_l, neg_l = dot_product_link_logits(
+                    z_eval, val_pos_edge_index, val_neg_edge_index
+                )
+                val_loss = float(mean_bce_logits_link_prediction(pos_l, neg_l))
             val_auc = metrics["roc_auc"]
             val_ap = metrics["average_precision"]
             history.val_auc.append(val_auc)
             history.val_ap.append(val_ap)
+            history.val_loss.append(val_loss)
 
         if epoch % 10 == 0 or epoch == config.epochs - 1:
             val_str = (
@@ -680,6 +704,8 @@ def _train_unsupervised_batched(
                 if val_auc is not None and val_ap is not None
                 else f" batches={num_batches}"
             )
+            if val_loss is not None:
+                val_str = f"{val_str} val_loss={val_loss:.4f}".strip()
             _LOG.info(
                 "epoch %04d loss=%.4f%s device=%s",
                 epoch,

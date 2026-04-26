@@ -8,7 +8,7 @@
 # Optional overrides:
 #   BUILD_PARTITION=batch
 #   SKIP_PREPARED_CACHE_BUILD=1
-#   PRIMEKG_INPUT=data/kg.csv
+#   PRIMEKG_INPUT=data/primekg.tsv
 #   FB15K237_INPUT=data/fb15k-237/fb15k-237.tsv
 #   SEED=42 IN_DIM=128 EDGE_DIM=128 EPOCHS=100
 

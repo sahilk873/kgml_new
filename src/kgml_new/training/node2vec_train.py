@@ -8,7 +8,11 @@ from torch_geometric.data import Data
 
 from kgml_new.config import Node2VecConfig
 from kgml_new.io.artifacts import torch_load_checkpoint, torch_save_checkpoint
-from kgml_new.training.eval import link_prediction_dot_product
+from kgml_new.training.eval import (
+    dot_product_link_logits,
+    link_prediction_dot_product,
+    mean_bce_logits_link_prediction,
+)
 from kgml_new.training.history import TrainingHistory
 from kgml_new.models.lightweight_node2vec import train_lightweight_node2vec
 
@@ -159,10 +163,11 @@ def train_node2vec_embeddings_with_validation(
     val_pos_edge_index: Tensor | None = None,
     val_neg_edge_index: Tensor | None = None,
 ) -> tuple[object, Tensor, int, TrainingHistory]:
-    """Train Node2Vec embeddings with proper GPU optimization and memory management.
-    
-    FIXED: Added mixed precision training, gradient clipping, learning rate scheduling,
-    and memory cleanup between batches.
+    """Train Node2Vec embeddings with optional link-prediction validation curves.
+
+    ``train_loss`` follows the skip-gram / negative-sampling objective. When validation
+    edges are provided, ``val_loss`` is mean link-prediction BCE on dot-product logits
+    (aligned with ``val_auc`` / ``val_ap``), not the skip-gram loss.
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -189,6 +194,12 @@ def train_node2vec_embeddings_with_validation(
         if val_pos_edge_index is not None and val_neg_edge_index is not None:
             metrics = link_prediction_dot_product(
                 z_eval, val_pos_edge_index, val_neg_edge_index
+            )
+            pos_l, neg_l = dot_product_link_logits(
+                z_eval, val_pos_edge_index, val_neg_edge_index
+            )
+            history.val_loss.append(
+                float(mean_bce_logits_link_prediction(pos_l, neg_l))
             )
             history.val_auc.append(metrics["roc_auc"])
             history.val_ap.append(metrics["average_precision"])

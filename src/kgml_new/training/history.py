@@ -18,6 +18,7 @@ class TrainingHistory:
     batch_count: list[int] = field(default_factory=list)
     val_auc: list[float] = field(default_factory=list)
     val_ap: list[float] = field(default_factory=list)
+    val_loss: list[float] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -30,7 +31,8 @@ class TrainingHistory:
         last_loss = self.train_loss[-1] if self.train_loss else None
         best_auc = max(self.val_auc) if self.val_auc else None
         best_ap = max(self.val_ap) if self.val_ap else None
+        best_val_loss = min(self.val_loss) if self.val_loss else None
         return (
             f"TrainingHistory(last_epoch={last_epoch}, last_loss={last_loss}, "
-            f"best_val_auc={best_auc}, best_val_ap={best_ap})"
+            f"best_val_auc={best_auc}, best_val_ap={best_ap}, best_val_loss={best_val_loss})"
         )

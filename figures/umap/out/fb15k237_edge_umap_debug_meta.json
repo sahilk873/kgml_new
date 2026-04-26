@@ -1,0 +1,32 @@
+{
+  "methods": [
+    "baseline_gcn",
+    "baseline_sage",
+    "node2vec",
+    "edge_aware_openai",
+    "edge_aware_gemini",
+    "edge_aware_e5",
+    "hgt_edge"
+  ],
+  "paths": [
+    "/scratch/pioneer/users/sxk2517/kgml_new/results/slurm/artifacts/fb15k237_edge_baseline_gcn_3256270_13.train_embeddings.pt",
+    "/scratch/pioneer/users/sxk2517/kgml_new/results/slurm/artifacts/fb15k237_edge_baseline_sage_3257008_14.train_embeddings.pt",
+    "/scratch/pioneer/users/sxk2517/kgml_new/results/slurm/artifacts/fb15k237_edge_node2vec_3256270_12.train_embeddings.pt",
+    "/scratch/pioneer/users/sxk2517/kgml_new/results/slurm/artifacts/fb15k237_edge_edge_aware_sage_concat_openai_3257380_15.encoder.pt",
+    "/scratch/pioneer/users/sxk2517/kgml_new/results/slurm/artifacts/fb15k237_edge_edge_aware_sage_concat_gemini_3257380_16.encoder.pt",
+    "/scratch/pioneer/users/sxk2517/kgml_new/results/slurm/artifacts/fb15k237_edge_edge_aware_sage_concat_e5_3257380_17.encoder.pt",
+    "/scratch/pioneer/users/sxk2517/kgml_new/figures/umap/embeddings/hgt_fb15k237_edge.export.pt"
+  ],
+  "layout": "faceted",
+  "seed": 42,
+  "color_by": "labels",
+  "labels_from_prepared": "cache/fb15k237-prepared_edge_s42_d128.pkl",
+  "label_mode": "relation_diversity",
+  "umap": {
+    "n_neighbors": 15,
+    "min_dist": 0.1,
+    "metric": "cosine"
+  },
+  "joint_l2_normalize": true,
+  "output_dir": "/scratch/pioneer/users/sxk2517/kgml_new/figures/umap/out"
+}
