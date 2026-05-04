@@ -1,4 +1,4 @@
-"""Central logging setup for CLI runs (file + stderr, structured phases)."""
+"""Configure loggers for CLI entry points (e.g. ``run_gpu_method``)."""
 
 from __future__ import annotations
 
@@ -6,45 +6,51 @@ import logging
 import sys
 from pathlib import Path
 
-KGML_LOGGER_NAME = "kgml_new"
+_KGML = "kgml_new"
+_configured = False
+
+
+def parse_log_level(name: str) -> int:
+    """Map a level name to :mod:`logging` constants (default INFO on unknown)."""
+    n = (name or "INFO").upper()
+    if n in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+        return int(getattr(logging, n))
+    return logging.INFO
 
 
 def setup_kgml_logging(
     *,
-    log_file: Path | None = None,
+    log_file: Path | str | None = None,
     level: int = logging.INFO,
-) -> logging.Logger:
+) -> None:
     """
-    Configure the ``kgml_new`` logger with stderr + optional file handlers.
-    Clears prior handlers on that logger to avoid duplicate lines on re-entry.
+    Attach stderr (and optionally file) handlers to the ``kgml_new`` logger tree.
+
+    Idempotent: only the first call in a process adds handlers.
     """
-    log = logging.getLogger(KGML_LOGGER_NAME)
-    log.handlers.clear()
-    log.setLevel(level)
-    log.propagate = False
+    global _configured
+    if _configured:
+        return
+    _configured = True
+
+    pkg = logging.getLogger(_KGML)
+    pkg.setLevel(level)
+    pkg.propagate = False
 
     fmt = logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
+        "%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
-    stderr = logging.StreamHandler(sys.stderr)
-    stderr.setFormatter(fmt)
-    log.addHandler(stderr)
+
+    err = logging.StreamHandler(sys.stderr)
+    err.setLevel(level)
+    err.setFormatter(fmt)
+    pkg.addHandler(err)
 
     if log_file is not None:
-        log_file = Path(log_file)
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(log_file, encoding="utf-8")
+        path = Path(log_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fh = logging.FileHandler(path, mode="a", encoding="utf-8")
+        fh.setLevel(level)
         fh.setFormatter(fmt)
-        log.addHandler(fh)
-
-    return log
-
-
-def get_train_logger() -> logging.Logger:
-    """Training loop messages (neighbor sampling, epochs)."""
-    return logging.getLogger(f"{KGML_LOGGER_NAME}.training")
-
-
-def parse_log_level(name: str) -> int:
-    return getattr(logging, name.upper(), logging.INFO)
+        pkg.addHandler(fh)

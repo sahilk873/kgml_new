@@ -9,7 +9,7 @@ from kgml_new.config import TrainConfig
 from kgml_new.data.datasets import prepare_link_prediction_dataset
 from kgml_new.data.graph import networkx_to_data
 from kgml_new.data.primekg import load_primekg_csv
-from kgml_new.embeddings.semantic import build_relation_tensor
+from kgml_new.embeddings.semantic import build_onehot_relation_tensor, build_relation_tensor
 from kgml_new.models.baseline_gcn import BaselineGCN
 from kgml_new.models.baseline_sage import BaselineGraphSAGE
 from kgml_new.models.edge_aware_sage import (
@@ -19,6 +19,7 @@ from kgml_new.models.edge_aware_sage import (
     RelationGatedGraphSAGE,
     build_edge_aware_model,
 )
+from kgml_new.models.rotate import RotatE
 from kgml_new.training.eval import evaluate_inductive_link_prediction, link_prediction_dot_product
 from kgml_new.training.link_unsupervised import compute_node_embeddings, train_unsupervised
 
@@ -81,6 +82,34 @@ def test_edge_aware_differs_from_zero_relations():
     z_zero = m0(data.x, data.edge_index, data.edge_attr)
 
     assert not torch.allclose(z_sem, z_zero, atol=1e-5)
+
+
+def test_build_onehot_relation_tensor_matches_lookup():
+    _, relation_lookup = _toy_data()
+    device = torch.device("cpu")
+    rt = build_onehot_relation_tensor(relation_lookup, device)
+    r = max(relation_lookup.values()) + 1
+    assert rt.shape == (r, r)
+    assert torch.allclose(rt, torch.eye(r))
+
+
+def test_edge_aware_onehot_forward_smoke():
+    data, relation_lookup = _toy_data()
+    device = torch.device("cpu")
+    edge_dim = 8
+    rt = build_onehot_relation_tensor(relation_lookup, device)
+    m = EdgeAwareGraphSAGE(
+        in_channels=16,
+        edge_dim=edge_dim,
+        hidden_channels=8,
+        out_channels=16,
+        relation_table=rt,
+        num_layers=2,
+        dropout=0.0,
+        concat=True,
+    )
+    z = m(data.x, data.edge_index, data.edge_attr)
+    assert z.shape == (data.num_nodes, 16)
 
 
 def test_edge_aware_projects_full_relation_table_to_edge_space():
@@ -212,11 +241,39 @@ def test_build_edge_aware_model_selects_requested_mode():
 
 
 def test_baseline_graphsage_max_pool_forward():
-    m = BaselineGraphSAGE(16, 8, 16, num_layers=2, neighbor_aggr="max")
+    m = BaselineGraphSAGE(16, 8, 16, num_layers=2, aggr="max")
     x = torch.randn(5, 16)
     edge_index = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=torch.long)
     z = m(x, edge_index)
     assert z.shape == (5, 16)
+
+
+def test_rotate_score_logits_shape():
+    m = RotatE(num_entities=12, num_relations=3, embedding_dim=4, gamma=2.0)
+    src = torch.tensor([0, 1, 2], dtype=torch.long)
+    rel = torch.tensor([0, 1, 2], dtype=torch.long)
+    dst = torch.tensor([3, 4, 5], dtype=torch.long)
+    logits = m.score_logits(src, rel, dst)
+    assert logits.shape == (3,)
+
+
+def test_rotate_different_relations_change_score():
+    m = RotatE(num_entities=8, num_relations=4, embedding_dim=8, gamma=1.0)
+    torch.manual_seed(0)
+    m.reset_parameters()
+    h, r1, t = 0, 0, 1
+    s0 = m.score_logits(
+        torch.tensor([h], dtype=torch.long),
+        torch.tensor([r1], dtype=torch.long),
+        torch.tensor([t], dtype=torch.long),
+    )
+    s1 = m.score_logits(
+        torch.tensor([h], dtype=torch.long),
+        torch.tensor([2], dtype=torch.long),
+        torch.tensor([t], dtype=torch.long),
+    )
+    assert s0.shape == (1,)
+    assert not torch.allclose(s0, s1)
 
 
 def test_edge_aware_isolated_node_embedding_nonzero():

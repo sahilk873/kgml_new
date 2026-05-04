@@ -124,6 +124,8 @@ def method_series_label(payload: dict[str, Any]) -> str:
         emb = payload.get("embedding_model") or payload.get("embedding_model_resolved") or ""
         emb = str(emb).strip()
         return f"{m} ({emb})" if emb else m
+    if m == "edge_aware_sage_onehot":
+        return m
     if m == "edge_aware_sage_node_emb":
         emb = payload.get("embedding_model") or payload.get("embedding_model_resolved") or ""
         emb = str(emb).strip()

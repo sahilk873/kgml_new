@@ -11,6 +11,7 @@ from kgml_new.models.lightweight_node2vec import Node2VecEmbedding
 from kgml_new.models.link_mlp import LinkPredictionMLP
 from kgml_new.models.node_classifier import NodeClassificationMLP
 from kgml_new.models.hgt import HGTLinkPredictor
+from kgml_new.models.rotate import RotatE
 from kgml_new.models.txgnn import TxGNN
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "EDGE_RELATION_MODES",
     "EdgeAwareGraphSAGE",
     "HGTLinkPredictor",
+    "RotatE",
     "LinkPredictionMLP",
     "NodeClassificationMLP",
     "Node2VecEmbedding",

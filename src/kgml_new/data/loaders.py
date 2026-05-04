@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
-import pickle
+from typing import Any
 
 import networkx as nx
 import pandas as pd
@@ -10,13 +11,13 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class GraphCSVSpec:
-    source_col: str
-    target_col: str
-    relation_col: str = "relation"
-    source_type_col: str | None = None
-    target_type_col: str | None = None
-    source_id_col: str | None = None
-    target_id_col: str | None = None
+    source_col: str = "x_name"
+    target_col: str = "y_name"
+    relation_col: str = "display_relation"
+    source_type_col: str = "x_type"
+    target_type_col: str = "y_type"
+    source_id_col: str = "x_id"
+    target_id_col: str = "y_id"
     node_type_attr: str = "node_type"
     relation_attr: str = "relationship"
     default_node_type: str = "entity"
@@ -25,138 +26,86 @@ class GraphCSVSpec:
     delimiter: str | None = None
 
 
-PRIMEKG_CSV_SPEC = GraphCSVSpec(
-    source_col="x_name",
-    target_col="y_name",
-    relation_col="relation",
-    source_type_col="x_type",
-    target_type_col="y_type",
-    source_id_col="x_id",
-    target_id_col="y_id",
-    edge_attr_cols=("display_relation", "x_source", "y_source"),
-)
+PRIMEKG_CSV_SPEC = GraphCSVSpec()
 
 
-def load_pickled_graph(path: Path) -> nx.Graph:
-    with path.open("rb") as f:
-        obj = pickle.load(f)
-    if not isinstance(obj, nx.Graph):
-        raise TypeError(f"Expected networkx.Graph, got {type(obj)}")
-    return obj
+def _node_type_from_name_or_default(name: str, *, default: str) -> str:
+    """DRKG-style ``Gene::2157`` → ``gene``; otherwise ``default``."""
+    s = str(name)
+    if "::" in s:
+        return s.split("::", 1)[0].strip().lower()
+    return default
 
 
 def load_graph_csv(
-    csv_path: Path,
+    path: str | Path,
     *,
-    spec: GraphCSVSpec,
+    spec: GraphCSVSpec = PRIMEKG_CSV_SPEC,
     max_edges: int | None = None,
-    low_memory: bool = False,
 ) -> nx.Graph:
-    graph_cls = nx.DiGraph if spec.directed else nx.Graph
-    graph = graph_cls()
-    df = _read_graph_table(csv_path, spec=spec, low_memory=low_memory)
-
-    if max_edges is not None:
-        df = df.head(max_edges)
-
-    for _, row in df.iterrows():
-        src = str(row[spec.source_col])
-        dst = str(row[spec.target_col])
-        relation = str(row[spec.relation_col]).strip()
-
-        src_attrs = {spec.node_type_attr: spec.default_node_type}
-        dst_attrs = {spec.node_type_attr: spec.default_node_type}
-        if spec.source_type_col:
-            src_attrs[spec.node_type_attr] = str(row.get(spec.source_type_col, spec.default_node_type))
-        else:
-            inferred_src_type = _infer_node_type(src)
-            if inferred_src_type is not None:
-                src_attrs[spec.node_type_attr] = inferred_src_type
-        if spec.target_type_col:
-            dst_attrs[spec.node_type_attr] = str(row.get(spec.target_type_col, spec.default_node_type))
-        else:
-            inferred_dst_type = _infer_node_type(dst)
-            if inferred_dst_type is not None:
-                dst_attrs[spec.node_type_attr] = inferred_dst_type
-        if spec.source_id_col:
-            src_attrs["node_id"] = str(row.get(spec.source_id_col, src))
-        if spec.target_id_col:
-            dst_attrs["node_id"] = str(row.get(spec.target_id_col, dst))
-
-        graph.add_node(src, **src_attrs)
-        graph.add_node(dst, **dst_attrs)
-
-        edge_attrs = {spec.relation_attr: relation}
-        for col in spec.edge_attr_cols:
-            value = row.get(col)
-            if value is not None and not pd.isna(value):
-                edge_attrs[col] = value
-        graph.add_edge(src, dst, **edge_attrs)
-
-    return graph
-
-
-def _infer_delimiter(path: Path, explicit_delimiter: str | None) -> str:
-    if explicit_delimiter:
-        return explicit_delimiter
-    with path.open("r", encoding="utf-8") as handle:
-        first_line = handle.readline()
-    if "\t" in first_line and "," not in first_line:
-        return "\t"
-    return ","
-
-
-def _has_header(path: Path, *, delimiter: str, spec: GraphCSVSpec) -> bool:
-    with path.open("r", encoding="utf-8") as handle:
-        first_line = handle.readline().strip()
-    if not first_line:
-        return False
-    tokens = {token.strip() for token in first_line.split(delimiter)}
-    expected = {
+    graph: nx.Graph = nx.DiGraph() if spec.directed else nx.Graph()
+    usecols = {
         spec.source_col,
         spec.target_col,
         spec.relation_col,
+        spec.source_type_col,
+        spec.target_type_col,
     }
-    if spec.source_type_col:
-        expected.add(spec.source_type_col)
-    if spec.target_type_col:
-        expected.add(spec.target_type_col)
-    return len(tokens & expected) >= 2
-
-
-def _read_graph_table(
-    csv_path: Path,
-    *,
-    spec: GraphCSVSpec,
-    low_memory: bool,
-) -> pd.DataFrame:
-    delimiter = _infer_delimiter(csv_path, spec.delimiter)
-    if _has_header(csv_path, delimiter=delimiter, spec=spec):
-        return pd.read_csv(csv_path, sep=delimiter, low_memory=low_memory)
-
-    preview = pd.read_csv(csv_path, sep=delimiter, header=None, nrows=5, low_memory=low_memory)
-    if preview.shape[1] < 3:
-        raise ValueError(
-            f"Expected at least 3 columns in headerless edge list, found {preview.shape[1]} in {csv_path}"
+    usecols.update(spec.edge_attr_cols)
+    path = Path(path)
+    probe = pd.read_csv(path, nrows=1)
+    if spec.source_col in probe.columns and spec.target_col in probe.columns:
+        df_iter = pd.read_csv(path, usecols=lambda c: c in usecols, chunksize=500_000)
+    else:
+        # Headerless TSV: source TAB relation TAB target (column names from ``spec``).
+        names = [spec.source_col, spec.relation_col, spec.target_col]
+        df_iter = pd.read_csv(
+            path,
+            sep="\t",
+            header=None,
+            names=names,
+            usecols=list(range(len(names))),
+            chunksize=500_000,
         )
+    seen = 0
+    for df in df_iter:
+        if max_edges is not None:
+            remaining = max_edges - seen
+            if remaining <= 0:
+                break
+            df = df.head(remaining)
+        for row in df.itertuples(index=False):
+            rec = row._asdict()
+            src = str(rec[spec.source_col])
+            dst = str(rec[spec.target_col])
+            if spec.source_type_col in rec and rec.get(spec.source_type_col) is not None:
+                src_type = str(rec.get(spec.source_type_col, spec.default_node_type))
+            else:
+                src_type = _node_type_from_name_or_default(src, default=spec.default_node_type)
+            if spec.target_type_col in rec and rec.get(spec.target_type_col) is not None:
+                dst_type = str(rec.get(spec.target_type_col, spec.default_node_type))
+            else:
+                dst_type = _node_type_from_name_or_default(dst, default=spec.default_node_type)
+            rel = str(rec.get(spec.relation_col, "UNK"))
+            graph.add_node(src, **{spec.node_type_attr: src_type})
+            graph.add_node(dst, **{spec.node_type_attr: dst_type})
+            attrs: dict[str, Any] = {spec.relation_attr: rel}
+            for col in spec.edge_attr_cols:
+                if col in rec:
+                    attrs[col] = rec[col]
+            graph.add_edge(src, dst, **attrs)
+        seen += len(df)
+    return graph
 
-    base_names = [spec.source_col, spec.relation_col, spec.target_col]
-    extra_names = [f"extra_{idx}" for idx in range(preview.shape[1] - len(base_names))]
-    column_names = base_names + extra_names
-    return pd.read_csv(
-        csv_path,
-        sep=delimiter,
-        header=None,
-        names=column_names,
-        low_memory=low_memory,
-    )
+
+def load_primekg_csv(path: str | Path, *, max_edges: int | None = None) -> nx.Graph:
+    """Load PrimeKG ``kg.csv`` (columns match ``PRIMEKG_CSV_SPEC``)."""
+    return load_graph_csv(path, spec=PRIMEKG_CSV_SPEC, max_edges=max_edges)
 
 
-def _infer_node_type(node_name: str) -> str | None:
-    if "::" not in node_name:
-        return None
-    prefix, _ = node_name.split("::", 1)
-    prefix = prefix.strip()
-    if not prefix:
-        return None
-    return prefix.lower()
+def load_pickled_graph(path: str | Path) -> nx.Graph:
+    with open(path, "rb") as f:
+        obj = pickle.load(f)
+    if not isinstance(obj, nx.Graph):
+        raise TypeError(f"Expected a networkx graph in {path}, got {type(obj)}")
+    return obj

@@ -150,6 +150,14 @@ def _input_fingerprint_compatible_for_reload(
     return True
 
 
+def _normalize_graph_csv_meta_dict(d: dict[str, Any]) -> dict[str, Any]:
+    """Older caches may omit optional CSV spec keys present in current runners."""
+    out = dict(d)
+    if "delimiter" not in out:
+        out["delimiter"] = None
+    return out
+
+
 def _assert_meta_subset(expected: dict[str, Any], actual: dict[str, Any], path: Path) -> None:
     mismatches: list[str] = []
     for key, exp_val in expected.items():
@@ -163,6 +171,18 @@ def _assert_meta_subset(expected: dict[str, Any], actual: dict[str, Any], path: 
             and isinstance(act_val, dict)
             and _input_fingerprint_compatible_for_reload(exp_val, act_val)
         ):
+            continue
+        if (
+            key == "graph_csv_spec"
+            and isinstance(exp_val, dict)
+            and isinstance(act_val, dict)
+        ):
+            if _normalize_graph_csv_meta_dict(exp_val) != _normalize_graph_csv_meta_dict(
+                act_val
+            ):
+                mismatches.append(
+                    f"{key!r}: cache has {act_val!r}, expected {exp_val!r}"
+                )
             continue
         if exp_val != act_val:
             mismatches.append(f"{key!r}: cache has {act_val!r}, expected {exp_val!r}")

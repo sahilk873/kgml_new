@@ -16,13 +16,22 @@ from kgml_new.training.node2vec_train import (
     train_node2vec_embeddings,
     train_node2vec_embeddings_with_validation,
 )
-from kgml_new.training.node_classification import (
-    NODE_CLASSIFICATION_METHODS,
-    NodeClassificationHistory,
-    train_embedding_node_classifier,
-    train_native_node_classifier,
-    train_txgnn_node_classifier,
-)
+
+try:
+    from kgml_new.training.node_classification import (
+        NODE_CLASSIFICATION_METHODS,
+        NodeClassificationHistory,
+        train_embedding_node_classifier,
+        train_native_node_classifier,
+        train_txgnn_node_classifier,
+    )
+except ImportError:  # optional / not shipped in all checkouts
+    NODE_CLASSIFICATION_METHODS = ()
+    NodeClassificationHistory = None  # type: ignore[misc,assignment]
+    train_embedding_node_classifier = None  # type: ignore[misc,assignment]
+    train_native_node_classifier = None  # type: ignore[misc,assignment]
+    train_txgnn_node_classifier = None  # type: ignore[misc,assignment]
+
 from kgml_new.training.train_link_mlp import (
     train_link_mlp,
     train_link_mlp_with_validation,
@@ -57,3 +66,12 @@ __all__ = [
     "evaluate_hgt_relation",
     "HGTTrainResult",
 ]
+
+if NodeClassificationHistory is None:
+    __all__ = [x for x in __all__ if x not in frozenset({
+        "NODE_CLASSIFICATION_METHODS",
+        "NodeClassificationHistory",
+        "train_embedding_node_classifier",
+        "train_native_node_classifier",
+        "train_txgnn_node_classifier",
+    })]

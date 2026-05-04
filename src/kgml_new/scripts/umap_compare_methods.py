@@ -544,6 +544,7 @@ def run(argv: list[str] | None = None) -> None:
 
     out_dir = Path(args.output_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    joint_skipped_reason: str | None = None
 
     if args.layout in ("faceted", "both"):
         coords_fac: list[np.ndarray] = []
@@ -579,36 +580,46 @@ def run(argv: list[str] | None = None) -> None:
             )
 
     if args.layout in ("joint", "both"):
-        mats = [optional_row_l2_normalize(le.matrix, args.joint_l2_normalize) for le in loads]
-        mats = joint_standardize(mats)
-        stacked = np.vstack(mats).astype(np.float32)
-        labels = np.concatenate(
-            [np.full(le.matrix.shape[0], i, dtype=np.int32) for i, le in enumerate(loads)]
-        )
-        nn_joint = max(2, min(args.n_neighbors, max(1, stacked.shape[0] - 1)))
-        reducer_j = umap_lib.UMAP(
-            n_neighbors=nn_joint,
-            min_dist=args.min_dist,
-            metric=args.metric,
-            random_state=args.seed + 1,
-            verbose=False,
-        )
-        xy_joint = reducer_j.fit_transform(stacked)
-        joint_path = out_dir / f"{args.stem}_joint.png"
-        _plot_joint(
-            stacked_coords=xy_joint.astype(np.float32),
-            method_labels=labels,
-            method_names=[le.name for le in loads],
-            out_path=joint_path,
-            title=args.title + " (joint; standardized per method)",
-        )
-        if args.save_npz:
-            np.savez(
-                out_dir / f"{args.stem}_joint.npz",
-                xy=xy_joint.astype(np.float32),
-                method_index=labels,
-                method_names=np.array([le.name for le in loads]),
+        dims = {int(le.matrix.shape[1]) for le in loads}
+        if len(dims) > 1:
+            joint_skipped_reason = (
+                f"Embedding dimensions differ across methods: {sorted(dims)}"
             )
+            if args.layout == "joint":
+                raise SystemExit(
+                    f"Cannot run joint UMAP with mixed embedding dims: {sorted(dims)}"
+                )
+        else:
+            mats = [optional_row_l2_normalize(le.matrix, args.joint_l2_normalize) for le in loads]
+            mats = joint_standardize(mats)
+            stacked = np.vstack(mats).astype(np.float32)
+            labels = np.concatenate(
+                [np.full(le.matrix.shape[0], i, dtype=np.int32) for i, le in enumerate(loads)]
+            )
+            nn_joint = max(2, min(args.n_neighbors, max(1, stacked.shape[0] - 1)))
+            reducer_j = umap_lib.UMAP(
+                n_neighbors=nn_joint,
+                min_dist=args.min_dist,
+                metric=args.metric,
+                random_state=args.seed + 1,
+                verbose=False,
+            )
+            xy_joint = reducer_j.fit_transform(stacked)
+            joint_path = out_dir / f"{args.stem}_joint.png"
+            _plot_joint(
+                stacked_coords=xy_joint.astype(np.float32),
+                method_labels=labels,
+                method_names=[le.name for le in loads],
+                out_path=joint_path,
+                title=args.title + " (joint; standardized per method)",
+            )
+            if args.save_npz:
+                np.savez(
+                    out_dir / f"{args.stem}_joint.npz",
+                    xy=xy_joint.astype(np.float32),
+                    method_index=labels,
+                    method_names=np.array([le.name for le in loads]),
+                )
 
     meta = {
         "methods": [m["name"] for m in methods_list],
@@ -629,6 +640,7 @@ def run(argv: list[str] | None = None) -> None:
             "metric": args.metric,
         },
         "joint_l2_normalize": args.joint_l2_normalize,
+        "joint_skipped_reason": joint_skipped_reason,
         "output_dir": str(out_dir),
     }
     (out_dir / f"{args.stem}_meta.json").write_text(json.dumps(meta, indent=2))

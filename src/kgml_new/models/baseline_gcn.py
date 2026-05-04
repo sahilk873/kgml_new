@@ -4,34 +4,31 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch_geometric.nn import GCNConv
-from torch_geometric.typing import Adj
 
 
 class BaselineGCN(nn.Module):
     def __init__(
         self,
-        in_channels: int,
-        hidden_channels: int,
-        out_channels: int,
+        in_dim: int,
+        hidden_dim: int,
+        out_dim: int,
+        *,
         num_layers: int = 2,
         dropout: float = 0.0,
         normalize_output: bool = True,
-    ):
+    ) -> None:
         super().__init__()
-        self.convs = nn.ModuleList()
-        self.convs.append(GCNConv(in_channels, hidden_channels))
-        for _ in range(num_layers - 2):
-            self.convs.append(GCNConv(hidden_channels, hidden_channels))
-        self.convs.append(GCNConv(hidden_channels, out_channels))
-        self.dropout = dropout
-        self.normalize_output = normalize_output
+        dims = [in_dim] + [hidden_dim] * max(0, num_layers - 1) + [out_dim]
+        self.convs = nn.ModuleList(GCNConv(dims[i], dims[i + 1]) for i in range(len(dims) - 1))
+        self.dropout = float(dropout)
+        self.normalize_output = bool(normalize_output)
 
-    def forward(self, x: torch.Tensor, edge_index: Adj) -> torch.Tensor:
-        for i, conv in enumerate(self.convs[:-1]):
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        for i, conv in enumerate(self.convs):
             x = conv(x, edge_index)
-            x = F.relu(x)
-            x = F.dropout(x, p=self.dropout, training=self.training)
-        x = self.convs[-1](x, edge_index)
+            if i != len(self.convs) - 1:
+                x = torch.relu(x)
+                x = torch.dropout(x, p=self.dropout, train=self.training)
         if self.normalize_output:
             x = F.normalize(x, p=2, dim=-1)
         return x

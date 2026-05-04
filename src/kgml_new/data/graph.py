@@ -1,51 +1,44 @@
 from __future__ import annotations
 
+import logging
+from collections.abc import Sequence
+from typing import Any
+
 import networkx as nx
-import numpy as np
 import torch
+from torch import Tensor
 from torch_geometric.data import Data
+from torch_geometric.data import HeteroData
 
-from kgml_new.data.relations import build_relation_lookup, get_edge_relation
-
-
-def _relation_index(relation_lookup: dict[str, int], rel: str) -> int:
-    if rel in relation_lookup:
-        return relation_lookup[rel]
-    u = rel.upper()
-    if u in relation_lookup:
-        return relation_lookup[u]
-    l = rel.lower()
-    if l in relation_lookup:
-        return relation_lookup[l]
-    return relation_lookup["UNK"]
+_LOG = logging.getLogger(__name__)
 
 
-def _node_features(
+def _extract_node_features(
+    graph: nx.Graph, feature_attr: str | None = None
+) -> dict[str, Tensor]:
+    if feature_attr is None:
+        return {}
+    feature_dict = {}
+    for node, attrs in graph.nodes(data=True):
+        if feature_attr in attrs:
+            feature_dict[node] = torch.tensor(attrs[feature_attr])
+    return feature_dict
+
+
+def convert_nx_node_attrs_to_tensor(
     graph: nx.Graph,
-    node_list: list,
-    feat_dim: int,
-    seed: int,
-    feature_attr: str = "feat",
-    missing_feature_strategy: str = "random",
-) -> torch.Tensor:
-    rng = np.random.default_rng(seed)
-    rows: list[np.ndarray] = []
-    for node in node_list:
-        if feature_attr in graph.nodes[node]:
-            feat = np.asarray(graph.nodes[node][feature_attr], dtype=np.float32).ravel()
-        else:
-            if missing_feature_strategy == "zeros":
-                feat = np.zeros(feat_dim, dtype=np.float32)
-            elif missing_feature_strategy == "ones":
-                feat = np.ones(feat_dim, dtype=np.float32)
+    attr: str,
+    dtype: type = torch.float32,
+) -> dict[int, Tensor]:
+    result = {}
+    for node, attrs in graph.nodes(data=True):
+        if attr in attrs:
+            val = attrs[attr]
+            if isinstance(val, Sequence):
+                result[node] = torch.tensor(val, dtype=dtype)
             else:
-                feat = rng.standard_normal(feat_dim).astype(np.float32)
-        if feat.size < feat_dim:
-            feat = np.pad(feat, (0, feat_dim - feat.size))
-        elif feat.size > feat_dim:
-            feat = feat[:feat_dim]
-        rows.append(feat)
-    return torch.from_numpy(np.stack(rows, axis=0))
+                result[node] = torch.tensor([val], dtype=dtype)
+    return result
 
 
 def networkx_to_data(
@@ -53,66 +46,103 @@ def networkx_to_data(
     *,
     in_dim: int,
     relation_lookup: dict[str, int] | None = None,
-    seed: int = 42,
+    seed: int = 0,
     add_self_loops: bool = False,
-    feature_attr: str = "feat",
-    missing_feature_strategy: str = "random",
 ) -> tuple[Data, dict[str, int]]:
-    """
-    Convert an undirected NetworkX graph to PyG Data.
+    """Homogeneous ``nx.Graph`` → PyG ``Data`` with bidirected edges and relation ids."""
+    from kgml_new.data.relations import get_edge_relation
 
-    - x: node features (random Gaussian if no node['feat']).
-    - edge_index: bidirectional edges.
-    - edge_attr: long tensor of relation indices per directed edge (UNK=0).
+    nodes = list(graph.nodes())
+    node_to_idx = {node: i for i, node in enumerate(nodes)}
+    n = len(nodes)
+    if n == 0:
+        raise ValueError("networkx_to_data requires a non-empty graph")
 
-    If relation_lookup is None, builds it from edge types present in the graph.
-    """
-    node_list = list(graph.nodes())
-    node_to_idx = {n: i for i, n in enumerate(node_list)}
-    num_nodes = len(node_list)
+    rel_on_edge: list[str] = []
+    for _, _, attrs in graph.edges(data=True):
+        rel_on_edge.append(get_edge_relation(attrs))
 
-    if relation_lookup is None:
-        keys: set[str] = set()
-        for _, _, data in graph.edges(data=True):
-            keys.add(get_edge_relation(data))
-        rel_keys = sorted(keys)
-        relation_lookup, _ = build_relation_lookup(rel_keys)
+    lookup = dict(relation_lookup) if relation_lookup is not None else {}
+    next_id = max(lookup.values(), default=-1) + 1
+    for rel in sorted(set(rel_on_edge)):
+        if rel not in lookup:
+            lookup[rel] = next_id
+            next_id += 1
+    if "UNK" not in lookup:
+        lookup["UNK"] = next_id
+        next_id += 1
 
-    sources: list[int] = []
-    targets: list[int] = []
-    edge_attrs: list[int] = []
+    torch.manual_seed(seed)
+    x = torch.randn((n, in_dim), dtype=torch.float32)
 
-    for u, v, data in graph.edges(data=True):
-        rel = get_edge_relation(data)
-        idx = _relation_index(relation_lookup, rel)
-        iu, iv = node_to_idx[u], node_to_idx[v]
-        sources.extend([iu, iv])
-        targets.extend([iv, iu])
-        edge_attrs.extend([idx, idx])
+    src_list: list[int] = []
+    dst_list: list[int] = []
+    attr_list: list[int] = []
+    for u, v, attrs in graph.edges(data=True):
+        rel = get_edge_relation(attrs)
+        rid = int(lookup[rel])
+        ui, vi = node_to_idx[u], node_to_idx[v]
+        src_list.extend((ui, vi))
+        dst_list.extend((vi, ui))
+        attr_list.extend((rid, rid))
 
-    edge_index = torch.tensor([sources, targets], dtype=torch.long)
-    edge_attr = torch.tensor(edge_attrs, dtype=torch.long)
-
-    x = _node_features(
-        graph,
-        node_list,
-        in_dim,
-        seed,
-        feature_attr=feature_attr,
-        missing_feature_strategy=missing_feature_strategy,
-    )
-
-    data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, num_nodes=num_nodes)
     if add_self_loops:
-        from torch_geometric.utils import add_self_loops as pyg_add_self_loops
+        fallback = int(next(iter(lookup.values())))
+        for i in range(n):
+            src_list.append(i)
+            dst_list.append(i)
+            attr_list.append(fallback)
 
-        edge_index, edge_attr = pyg_add_self_loops(
-            edge_index,
-            edge_attr=edge_attr,
-            num_nodes=num_nodes,
-            fill_value=relation_lookup["UNK"],
-        )
-        data.edge_index = edge_index
-        data.edge_attr = edge_attr
+    edge_index = torch.tensor([src_list, dst_list], dtype=torch.long)
+    edge_attr = torch.tensor(attr_list, dtype=torch.long)
+    data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+    return data, lookup
 
-    return data, relation_lookup
+
+def networkx_to_heterodata(
+    graph: nx.Graph,
+    *,
+    in_dim: int,
+    seed: int = 0,
+    add_reverse_edges: bool = True,
+) -> HeteroData:
+    """``HeteroData`` keyed by ``node_type``; edge stores use ``(src_type, rel, dst_type)``."""
+    from kgml_new.data.relations import get_edge_relation
+
+    type_order: list[str] = []
+    type_to_nodes: dict[str, list[Any]] = {}
+    for node, attrs in graph.nodes(data=True):
+        nt = str(attrs.get("node_type", "entity"))
+        if nt not in type_to_nodes:
+            type_order.append(nt)
+            type_to_nodes[nt] = []
+        type_to_nodes[nt].append(node)
+
+    data = HeteroData()
+    torch.manual_seed(seed)
+    node_key: dict[Any, tuple[str, int]] = {}
+    for nt in type_order:
+        nodes = type_to_nodes[nt]
+        num = len(nodes)
+        data[nt].x = torch.randn(num, in_dim, dtype=torch.float32)
+        for local_i, node in enumerate(nodes):
+            node_key[node] = (nt, local_i)
+
+    triple_to_pairs: dict[tuple[str, str, str], list[list[int]]] = {}
+    for u, v, attrs in graph.edges(data=True):
+        if u not in node_key or v not in node_key:
+            continue
+        tu, iu = node_key[u]
+        tv, iv = node_key[v]
+        rel = get_edge_relation(attrs)
+        triple_to_pairs.setdefault((tu, rel, tv), []).append([iu, iv])
+        if add_reverse_edges:
+            triple_to_pairs.setdefault((tv, rel, tu), []).append([iv, iu])
+
+    for key, pairs in triple_to_pairs.items():
+        if not pairs:
+            continue
+        ei = torch.tensor(pairs, dtype=torch.long).t().contiguous()
+        data[key].edge_index = ei
+
+    return data

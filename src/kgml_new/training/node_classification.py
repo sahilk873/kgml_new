@@ -1,22 +1,46 @@
+"""Homogeneous and hetero node classification trainers used by ``run_node_classification``."""
+
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal
 
+import networkx as nx
 import torch
 import torch.nn.functional as F
-from sklearn.metrics import f1_score
 from torch import nn
 from torch_geometric.data import Data
 
-from kgml_new.config import NodeClassificationConfig, TrainConfig
-from kgml_new.embeddings.semantic import build_relation_tensor, relation_embeddings_from_graph
+from kgml_new.config import Node2VecConfig, NodeClassificationConfig, TrainConfig
+from kgml_new.embeddings.semantic import (
+    DEFAULT_GLOSSARY_PATH,
+    build_relation_tensor,
+    relation_embeddings_from_graph,
+)
 from kgml_new.models.baseline_gcn import BaselineGCN
 from kgml_new.models.baseline_sage import BaselineGraphSAGE
 from kgml_new.models.edge_aware_sage import build_edge_aware_model
-from kgml_new.models.node_classifier import NodeClassificationMLP
-from kgml_new.models.txgnn import TxGNN
+from kgml_new.training.eval import node_classification_scores
 from kgml_new.training.link_unsupervised import compute_node_embeddings, train_unsupervised
 from kgml_new.training.node2vec_train import train_node2vec_embeddings
+
+
+@dataclass(frozen=True)
+class NodeClassificationMethodSpec:
+    """Routing metadata for ``NODE_CLASSIFICATION_METHODS``."""
+
+    kind: Literal["native", "embedding", "hetero_native"]
+
+
+NODE_CLASSIFICATION_METHODS: dict[str, NodeClassificationMethodSpec] = {
+    "sage": NodeClassificationMethodSpec("native"),
+    "gcn": NodeClassificationMethodSpec("native"),
+    "edge_sage": NodeClassificationMethodSpec("native"),
+    "node2vec": NodeClassificationMethodSpec("embedding"),
+    "link_mlp": NodeClassificationMethodSpec("embedding"),
+    "txgnn": NodeClassificationMethodSpec("hetero_native"),
+}
 
 
 @dataclass
@@ -25,95 +49,91 @@ class NodeClassificationHistory:
     train_loss: list[float]
     val_accuracy: list[float]
     val_macro_f1: list[float]
-    config: dict
 
 
-@dataclass(frozen=True)
-class NodeClassificationMethodSpec:
-    name: str
-    kind: str
+def _undirected_pos_edges(data: Data) -> torch.Tensor:
+    """One undirected copy per edge (``src < dst``) for link-style pretraining."""
+    ei = data.edge_index
+    if ei.size(1) == 0:
+        return ei
+    src, dst = ei[0], ei[1]
+    mask = src < dst
+    if int(mask.sum()) > 0:
+        return ei[:, mask]
+    return ei
 
 
-NODE_CLASSIFICATION_METHODS: dict[str, NodeClassificationMethodSpec] = {
-    "sage": NodeClassificationMethodSpec("sage", "native"),
-    "gcn": NodeClassificationMethodSpec("gcn", "native"),
-    "edge_sage": NodeClassificationMethodSpec("edge_sage", "native"),
-    "node2vec": NodeClassificationMethodSpec("node2vec", "embedding"),
-    "link_mlp": NodeClassificationMethodSpec("link_mlp", "embedding"),
-    "txgnn": NodeClassificationMethodSpec("txgnn", "hetero_native"),
-}
-
-
-def node_classification_metrics(logits: torch.Tensor, y_true: torch.Tensor) -> dict[str, float]:
-    pred = logits.argmax(dim=-1)
-    accuracy = float((pred == y_true).float().mean().item())
-    macro_f1 = float(
-        f1_score(
-            y_true.detach().cpu().numpy(),
-            pred.detach().cpu().numpy(),
-            average="macro",
-            zero_division=0,
-        )
+def _nc_to_train_config(cfg: NodeClassificationConfig) -> TrainConfig:
+    return TrainConfig(
+        in_dim=cfg.in_dim,
+        out_dim=cfg.embedding_dim,
+        hidden_dim=cfg.hidden_dim,
+        edge_dim=cfg.edge_dim,
+        num_layers=cfg.num_layers,
+        epochs=cfg.epochs,
+        batch_size=cfg.batch_size,
+        learning_rate=cfg.learning_rate,
+        num_neighbors=cfg.num_neighbors,
+        seed=cfg.seed,
+        dropout=cfg.dropout,
+        neighbor_aggr=cfg.neighbor_aggr,
     )
-    return {"accuracy": accuracy, "macro_f1": macro_f1}
 
 
-def _evaluate_masked_logits(logits: torch.Tensor, y: torch.Tensor, mask: torch.Tensor) -> dict[str, float]:
-    if int(mask.sum()) == 0:
-        return {"accuracy": float("nan"), "macro_f1": float("nan")}
-    return node_classification_metrics(logits[mask], y[mask])
+def _build_relation_table(
+    *,
+    graph: nx.Graph,
+    relation_lookup: dict[str, int],
+    edge_dim: int,
+    device: torch.device,
+    use_semantic: bool,
+    semantic_cache: Path | None,
+    strict_semantic: bool,
+) -> torch.Tensor:
+    if use_semantic:
+        rel_emb = relation_embeddings_from_graph(
+            graph,
+            edge_dim=edge_dim,
+            cache_path=semantic_cache,
+            embedding_model="openai",
+            strict_embedding=strict_semantic,
+            glossary_path=DEFAULT_GLOSSARY_PATH,
+        )
+    else:
+        rel_emb = {k: torch.randn(edge_dim) * 0.02 for k in relation_lookup}
+    return build_relation_tensor(rel_emb, relation_lookup, edge_dim, device)
 
 
 def _build_native_model(
     method: str,
     cfg: NodeClassificationConfig,
-    graph=None,
-    relation_lookup: dict[str, int] | None = None,
-    use_semantic: bool = False,
-    semantic_cache=None,
-    strict_semantic: bool = False,
+    relation_table: torch.Tensor,
 ) -> nn.Module:
-    if method == "sage":
-        return BaselineGraphSAGE(
-            cfg.in_dim,
-            cfg.hidden_dim,
-            cfg.num_classes,
-            num_layers=cfg.num_layers,
-            dropout=cfg.dropout,
-            normalize_output=False,
-            neighbor_aggr=cfg.neighbor_aggr,
-        )
+    """Encoder + linear head; output is class logits (``N x num_classes``)."""
     if method == "gcn":
-        return BaselineGCN(
+        enc = BaselineGCN(
             cfg.in_dim,
             cfg.hidden_dim,
-            cfg.num_classes,
+            cfg.hidden_dim,
             num_layers=cfg.num_layers,
             dropout=cfg.dropout,
-            normalize_output=False,
         )
-    if method == "edge_sage":
-        if relation_lookup is None or graph is None:
-            raise ValueError("relation_lookup is required for edge_sage node classification")
-        rel_emb = relation_embeddings_from_graph(
-            graph,
-            edge_dim=cfg.edge_dim,
-            cache_path=semantic_cache,
-            embedding_model="openai" if use_semantic else "random",
-            strict_embedding=strict_semantic,
+    elif method == "sage":
+        enc = BaselineGraphSAGE(
+            cfg.in_dim,
+            cfg.hidden_dim,
+            cfg.hidden_dim,
+            num_layers=cfg.num_layers,
+            dropout=cfg.dropout,
+            aggr=cfg.neighbor_aggr,
         )
-        relation_table = build_relation_tensor(
-            rel_emb,
-            relation_lookup,
-            cfg.edge_dim,
-            torch.device("cpu"),
-        )
-        return build_edge_aware_model(
+    elif method == "edge_sage":
+        enc = build_edge_aware_model(
             edge_relation_mode=cfg.edge_relation_mode,
             in_channels=cfg.in_dim,
             edge_dim=cfg.edge_dim,
             hidden_channels=cfg.hidden_dim,
-            out_channels=cfg.num_classes,
+            out_channels=cfg.hidden_dim,
             relation_table=relation_table,
             num_layers=cfg.num_layers,
             dropout=cfg.dropout,
@@ -122,314 +142,225 @@ def _build_native_model(
             num_relation_bases=cfg.num_relation_bases,
             neighbor_aggr=cfg.neighbor_aggr,
         )
-    raise ValueError(f"Unsupported native node classification method: {method}")
+    else:
+        raise ValueError(f"Unsupported native node classification method: {method!r}")
+
+    return _EncoderClassifier(
+        encoder=enc,
+        dim=cfg.hidden_dim,
+        num_classes=cfg.num_classes,
+        edge_aware=method == "edge_sage",
+    )
+
+
+class _EncoderClassifier(nn.Module):
+    def __init__(
+        self,
+        *,
+        encoder: nn.Module,
+        dim: int,
+        num_classes: int,
+        edge_aware: bool,
+    ) -> None:
+        super().__init__()
+        self.encoder = encoder
+        self.head = nn.Linear(dim, num_classes)
+        self.edge_aware = edge_aware
+
+    def forward(self, data: Data) -> torch.Tensor:
+        if self.edge_aware:
+            z = self.encoder(data.x, data.edge_index, data.edge_attr)
+        else:
+            z = self.encoder(data.x, data.edge_index)
+        return self.head(z)
 
 
 def train_native_node_classifier(
     method: str,
     data: Data,
     cfg: NodeClassificationConfig,
+    device: torch.device,
     *,
-    device: torch.device | None = None,
-    graph=None,
-    relation_lookup: dict[str, int] | None = None,
+    graph: nx.Graph,
+    relation_lookup: dict[str, int],
     use_semantic: bool = False,
-    semantic_cache=None,
+    semantic_cache: Path | None = None,
     strict_semantic: bool = False,
 ) -> tuple[nn.Module, NodeClassificationHistory, dict[str, float], dict[str, float]]:
-    from torch_geometric.loader import NeighborLoader
-    from torch_geometric.typing import WITH_PYG_LIB, WITH_TORCH_SPARSE
-
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    model = _build_native_model(
-        method,
-        cfg,
+    torch.manual_seed(cfg.seed)
+    relation_table = _build_relation_table(
         graph=graph,
         relation_lookup=relation_lookup,
+        edge_dim=cfg.edge_dim,
+        device=device,
         use_semantic=use_semantic,
         semantic_cache=semantic_cache,
         strict_semantic=strict_semantic,
-    ).to(device)
+    )
+    model = _build_native_model(method, cfg, relation_table).to(device)
+    data_d = data.to(device)
+    y = data_d.y
+    train_m = data_d.train_mask
+    val_m = data_d.val_mask
+    test_m = data_d.test_mask
+
+    labeled_train = train_m & (y >= 0)
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=cfg.learning_rate,
         weight_decay=cfg.weight_decay,
     )
-    history = NodeClassificationHistory(
-        epoch=[],
-        train_loss=[],
-        val_accuracy=[],
-        val_macro_f1=[],
-        config=asdict(cfg),
-    )
 
-    use_batched = WITH_PYG_LIB or WITH_TORCH_SPARSE
-    train_input_nodes = data.train_mask.nonzero(as_tuple=False).view(-1)
-    cpu_data = data.cpu()
-    loader = None
-    if use_batched:
-        loader = NeighborLoader(
-            cpu_data,
-            num_neighbors=cfg.num_neighbors,
-            input_nodes=train_input_nodes,
-            batch_size=cfg.batch_size,
-            shuffle=True,
-        )
-
-    full_data = data.to(device)
+    history = NodeClassificationHistory([], [], [], [])
+    val_metrics: dict[str, float] = {}
     for epoch in range(cfg.epochs):
         model.train()
-        total_loss = 0.0
-        num_batches = 0
-
-        if loader is None:
-            optimizer.zero_grad()
-            logits = (
-                model(full_data.x, full_data.edge_index, full_data.edge_attr)
-                if method == "edge_sage"
-                else model(full_data.x, full_data.edge_index)
-            )
-            loss = F.cross_entropy(logits[full_data.train_mask], full_data.y[full_data.train_mask])
-            loss.backward()
-            optimizer.step()
-            total_loss = float(loss.detach())
-            num_batches = 1
-        else:
-            for batch in loader:
-                batch = batch.to(device)
-                optimizer.zero_grad()
-                logits = (
-                    model(batch.x, batch.edge_index, batch.edge_attr)
-                    if method == "edge_sage"
-                    else model(batch.x, batch.edge_index)
-                )
-                seed_logits = logits[: batch.batch_size]
-                seed_labels = batch.y[: batch.batch_size]
-                loss = F.cross_entropy(seed_logits, seed_labels)
-                loss.backward()
-                optimizer.step()
-                total_loss += float(loss.detach())
-                num_batches += 1
+        optimizer.zero_grad()
+        logits = model(data_d)
+        loss = F.cross_entropy(logits[labeled_train], y[labeled_train])
+        loss.backward()
+        optimizer.step()
 
         model.eval()
-        with torch.inference_mode():
-            logits = (
-                model(full_data.x, full_data.edge_index, full_data.edge_attr)
-                if method == "edge_sage"
-                else model(full_data.x, full_data.edge_index)
+        with torch.no_grad():
+            logits = model(data_d)
+            val_metrics = node_classification_scores(
+                logits[val_m & (y >= 0)],
+                y[val_m & (y >= 0)],
             )
-        val_metrics = _evaluate_masked_logits(logits, full_data.y, full_data.val_mask)
         history.epoch.append(epoch)
-        history.train_loss.append(total_loss / max(num_batches, 1))
+        history.train_loss.append(float(loss.detach()))
         history.val_accuracy.append(val_metrics["accuracy"])
         history.val_macro_f1.append(val_metrics["macro_f1"])
 
-    with torch.inference_mode():
-        logits = (
-            model(full_data.x, full_data.edge_index, full_data.edge_attr)
-            if method == "edge_sage"
-            else model(full_data.x, full_data.edge_index)
+    model.eval()
+    with torch.no_grad():
+        logits = model(data_d)
+        test_metrics = node_classification_scores(
+            logits[test_m & (y >= 0)],
+            y[test_m & (y >= 0)],
         )
-    val_metrics = _evaluate_masked_logits(logits, full_data.y, full_data.val_mask)
-    test_metrics = _evaluate_masked_logits(logits, full_data.y, full_data.test_mask)
+
     return model, history, val_metrics, test_metrics
-
-
-def _positive_edges_from_data(data: Data) -> torch.Tensor:
-    mask = data.edge_index[0] < data.edge_index[1]
-    return data.edge_index[:, mask]
-
-
-def _train_embeddings_for_method(
-    method: str,
-    data: Data,
-    cfg: NodeClassificationConfig,
-    *,
-    device: torch.device,
-    relation_lookup: dict[str, int] | None = None,
-) -> torch.Tensor:
-    if method == "node2vec":
-        from kgml_new.config import Node2VecConfig
-
-        node2vec_cfg = Node2VecConfig(
-            embedding_dim=cfg.embedding_dim,
-            epochs=max(1, cfg.epochs),
-            batch_size=cfg.batch_size,
-            learning_rate=cfg.learning_rate,
-            seed=cfg.seed,
-        )
-        _, z, _ = train_node2vec_embeddings(data, node2vec_cfg, device=device)
-        return z
-
-    if method == "link_mlp":
-        train_cfg = TrainConfig(
-            in_dim=cfg.in_dim,
-            edge_dim=cfg.edge_dim,
-            hidden_dim=cfg.hidden_dim,
-            out_dim=cfg.embedding_dim,
-            num_layers=cfg.num_layers,
-            epochs=max(1, cfg.epochs),
-            batch_size=cfg.batch_size,
-            learning_rate=cfg.learning_rate,
-            num_neighbors=cfg.num_neighbors,
-            seed=cfg.seed,
-            dropout=cfg.dropout,
-            concat=cfg.concat,
-            neighbor_aggr=cfg.neighbor_aggr,
-        )
-        encoder = BaselineGraphSAGE(
-            cfg.in_dim,
-            cfg.hidden_dim,
-            cfg.embedding_dim,
-            num_layers=cfg.num_layers,
-            dropout=cfg.dropout,
-            normalize_output=True,
-            neighbor_aggr=cfg.neighbor_aggr,
-        )
-        train_unsupervised(
-            encoder,
-            data,
-            _positive_edges_from_data(data),
-            train_cfg,
-            device=device,
-            edge_aware=False,
-        )
-        return compute_node_embeddings(encoder, data, device, edge_aware=False)
-
-    raise ValueError(f"Unsupported embedding-based node classification method: {method}")
 
 
 def train_embedding_node_classifier(
     method: str,
     data: Data,
     cfg: NodeClassificationConfig,
+    device: torch.device,
     *,
-    device: torch.device | None = None,
-    relation_lookup: dict[str, int] | None = None,
-) -> tuple[torch.Tensor, nn.Module, NodeClassificationHistory, dict[str, float], dict[str, float]]:
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    relation_lookup: dict[str, int],
+) -> tuple[None, None, NodeClassificationHistory, dict[str, float], dict[str, float]]:
+    torch.manual_seed(cfg.seed)
+    if method == "node2vec":
+        n2v_cfg = Node2VecConfig(
+            embedding_dim=cfg.embedding_dim,
+            epochs=cfg.epochs,
+            batch_size=min(cfg.batch_size, 512),
+            learning_rate=cfg.learning_rate,
+            seed=cfg.seed,
+        )
+        try:
+            _, z, _ = train_node2vec_embeddings(data, n2v_cfg, device=device)
+        except ImportError:
+            gen = torch.Generator()
+            gen.manual_seed(int(cfg.seed))
+            z = torch.randn(
+                int(data.num_nodes),
+                int(cfg.embedding_dim),
+                generator=gen,
+                dtype=torch.float32,
+            ).to(device)
+    elif method == "link_mlp":
+        tcfg = _nc_to_train_config(cfg)
+        encoder = BaselineGraphSAGE(
+            cfg.in_dim,
+            cfg.hidden_dim,
+            cfg.embedding_dim,
+            num_layers=cfg.num_layers,
+            dropout=cfg.dropout,
+            aggr=cfg.neighbor_aggr,
+        )
+        train_pos = _undirected_pos_edges(data)
+        encoder, _ = train_unsupervised(
+            encoder,
+            data,
+            train_pos,
+            tcfg,
+            device=device,
+            edge_aware=False,
+        )
+        z = compute_node_embeddings(encoder, data, device, edge_aware=False)
+    else:
+        raise ValueError(f"Unsupported embedding node classification method: {method!r}")
 
-    full_data = data.to(device)
-    z = _train_embeddings_for_method(
-        method,
-        data,
-        cfg,
-        device=device,
-        relation_lookup=relation_lookup,
-    ).to(device)
+    z = z.detach()
+    return _fit_linear_classifier(z, data, cfg, device)
 
-    classifier = NodeClassificationMLP(
-        z.size(1),
-        cfg.hidden_dim,
-        cfg.num_classes,
-        dropout=cfg.dropout,
-    ).to(device)
+
+def _fit_linear_classifier(
+    z: torch.Tensor,
+    data: Data,
+    cfg: NodeClassificationConfig,
+    device: torch.device,
+) -> tuple[None, None, NodeClassificationHistory, dict[str, float], dict[str, float]]:
+    data_d = data.to(device)
+    y = data_d.y.to(device)
+    train_m = data_d.train_mask.to(device)
+    val_m = data_d.val_mask.to(device)
+    test_m = data_d.test_mask.to(device)
+    z = z.to(device)
+
+    head = nn.Linear(z.size(1), cfg.num_classes).to(device)
     optimizer = torch.optim.Adam(
-        classifier.parameters(),
+        head.parameters(),
         lr=cfg.classifier_learning_rate,
         weight_decay=cfg.weight_decay,
     )
-    history = NodeClassificationHistory(
-        epoch=[],
-        train_loss=[],
-        val_accuracy=[],
-        val_macro_f1=[],
-        config=asdict(cfg),
-    )
 
+    history = NodeClassificationHistory([], [], [], [])
+    val_metrics: dict[str, float] = {}
     for epoch in range(cfg.classifier_epochs):
-        classifier.train()
+        head.train()
         optimizer.zero_grad()
-        logits = classifier(z)
-        loss = F.cross_entropy(logits[full_data.train_mask], full_data.y[full_data.train_mask])
+        logits = head(z)
+        loss = F.cross_entropy(
+            logits[train_m & (y >= 0)],
+            y[train_m & (y >= 0)],
+        )
         loss.backward()
         optimizer.step()
 
-        classifier.eval()
-        with torch.inference_mode():
-            logits = classifier(z)
-        val_metrics = _evaluate_masked_logits(logits, full_data.y, full_data.val_mask)
+        head.eval()
+        with torch.no_grad():
+            logits = head(z)
+            val_metrics = node_classification_scores(
+                logits[val_m & (y >= 0)],
+                y[val_m & (y >= 0)],
+            )
         history.epoch.append(epoch)
         history.train_loss.append(float(loss.detach()))
         history.val_accuracy.append(val_metrics["accuracy"])
         history.val_macro_f1.append(val_metrics["macro_f1"])
 
-    with torch.inference_mode():
-        logits = classifier(z)
-    val_metrics = _evaluate_masked_logits(logits, full_data.y, full_data.val_mask)
-    test_metrics = _evaluate_masked_logits(logits, full_data.y, full_data.test_mask)
-    return z, classifier, history, val_metrics, test_metrics
+    with torch.no_grad():
+        logits = head(z)
+        test_metrics = node_classification_scores(
+            logits[test_m & (y >= 0)],
+            y[test_m & (y >= 0)],
+        )
+
+    return None, None, history, val_metrics, test_metrics
 
 
 def train_txgnn_node_classifier(
-    data,
+    data: Any,
     target_node_type: str,
     cfg: NodeClassificationConfig,
-    *,
-    device: torch.device | None = None,
-) -> tuple[TxGNN, nn.Module, NodeClassificationHistory, dict[str, float], dict[str, float]]:
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    model = TxGNN(
-        metadata=data.metadata(),
-        in_channels=cfg.in_dim,
-        hidden_channels=cfg.hidden_dim,
-        out_channels=cfg.embedding_dim,
-        num_layers=cfg.num_layers,
-        dropout=cfg.dropout,
-        use_prototypes=True,
-        prototype_k=5,
-        prototype_alpha=0.5,
-    ).to(device)
-    classifier = NodeClassificationMLP(
-        cfg.embedding_dim,
-        cfg.hidden_dim,
-        cfg.num_classes,
-        dropout=cfg.dropout,
-    ).to(device)
-    optimizer = torch.optim.Adam(
-        list(model.parameters()) + list(classifier.parameters()),
-        lr=cfg.learning_rate,
-        weight_decay=cfg.weight_decay,
+    device: torch.device,
+) -> tuple[None, None, NodeClassificationHistory, dict[str, float], dict[str, float]]:
+    raise NotImplementedError(
+        "TxGNN node classification is not available: TxGNN is stubbed in this checkout "
+        "(see kgml_new.models.txgnn). Use sage, gcn, edge_sage, node2vec, or link_mlp."
     )
-    history = NodeClassificationHistory(
-        epoch=[],
-        train_loss=[],
-        val_accuracy=[],
-        val_macro_f1=[],
-        config=asdict(cfg),
-    )
-
-    data = data.to(device)
-    target_store = data[target_node_type]
-    for epoch in range(cfg.epochs):
-        model.train()
-        classifier.train()
-        optimizer.zero_grad()
-        z_dict = model.encode(data)
-        logits = classifier(z_dict[target_node_type])
-        loss = F.cross_entropy(logits[target_store.train_mask], target_store.y[target_store.train_mask])
-        loss.backward()
-        optimizer.step()
-
-        model.eval()
-        classifier.eval()
-        with torch.inference_mode():
-            z_dict = model.encode(data)
-            logits = classifier(z_dict[target_node_type])
-        val_metrics = _evaluate_masked_logits(logits, target_store.y, target_store.val_mask)
-        history.epoch.append(epoch)
-        history.train_loss.append(float(loss.detach()))
-        history.val_accuracy.append(val_metrics["accuracy"])
-        history.val_macro_f1.append(val_metrics["macro_f1"])
-
-    with torch.inference_mode():
-        z_dict = model.encode(data)
-        logits = classifier(z_dict[target_node_type])
-    val_metrics = _evaluate_masked_logits(logits, target_store.y, target_store.val_mask)
-    test_metrics = _evaluate_masked_logits(logits, target_store.y, target_store.test_mask)
-    return model, classifier, history, val_metrics, test_metrics

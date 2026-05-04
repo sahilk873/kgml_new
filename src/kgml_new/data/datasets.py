@@ -8,8 +8,7 @@ import torch
 from torch_geometric.data import Data
 from torch_geometric.data import HeteroData
 
-from kgml_new.data.graph import networkx_to_data
-from kgml_new.data.hetero import networkx_to_heterodata
+from kgml_new.data.graph import networkx_to_data, networkx_to_heterodata
 from kgml_new.training.splits import (
     EdgeSplit,
     NodeSplit,

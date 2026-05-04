@@ -1,0 +1,32 @@
+{
+  "methods": [
+    "baseline_gcn",
+    "baseline_sage",
+    "edge_aware_openai",
+    "edge_aware_e5",
+    "edge_aware_gemini",
+    "hgt_edge"
+  ],
+  "paths": [
+    "/scratch/pioneer/users/sxk2517/kgml_new/results/slurm/artifacts/primekg_edge_baseline_gcn_3257383_1.train_embeddings.pt",
+    "/scratch/pioneer/users/sxk2517/kgml_new/results/slurm/artifacts/primekg_edge_baseline_sage_3265306_2.train_embeddings.pt",
+    "/scratch/pioneer/users/sxk2517/kgml_new/results/slurm/artifacts/primekg_edge_edge_aware_sage_concat_openai_3265307_3.encoder.pt",
+    "/scratch/pioneer/users/sxk2517/kgml_new/results/slurm/artifacts/primekg_edge_edge_aware_sage_concat_e5_3257383_5.encoder.pt",
+    "/scratch/pioneer/users/sxk2517/kgml_new/results/slurm/artifacts/primekg_edge_edge_aware_sage_concat_gemini_3266959_4.encoder.pt",
+    "/scratch/pioneer/users/sxk2517/kgml_new/figures/umap/embeddings/hgt_primekg_edge.export.pt"
+  ],
+  "layout": "both",
+  "seed": 42,
+  "color_by": "labels",
+  "labels_from_prepared": null,
+  "labels_from_kg_csv": "data/kg.csv",
+  "label_mode": "node_type",
+  "umap": {
+    "n_neighbors": 15,
+    "min_dist": 0.1,
+    "metric": "cosine"
+  },
+  "joint_l2_normalize": true,
+  "joint_skipped_reason": "Embedding dimensions differ across methods: [64, 128]",
+  "output_dir": "/scratch/pioneer/users/sxk2517/kgml_new/figures/umap/out"
+}

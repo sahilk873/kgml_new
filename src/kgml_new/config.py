@@ -72,6 +72,23 @@ class LinkMLPConfig:
 
 
 @dataclass
+class RotatEConfig:
+    """RotatE training hyperparameters for ``run_gpu_method``."""
+
+    embedding_dim: int = 64
+    epochs: int = 100
+    batch_size: int = 1024
+    learning_rate: float = 1e-3
+    weight_decay: float = 0.0
+    neg_samples: int = 5
+    gamma: float = 12.0
+    seed: int = 42
+    early_stop_patience: int = 20
+    grad_clip_norm: float = 1.0
+    eval_batch_size: int = 4096
+
+
+@dataclass
 class NodeClassificationConfig:
     """Generic node-classification training configuration."""
 
@@ -172,6 +189,32 @@ def node2vec_config_from_run_gpu_method_args(ns: Any) -> Node2VecConfig:
         cfg = replace(cfg, batch_size=int(ns.n2v_batch_size))
     if getattr(ns, "n2v_num_negative_samples", None) is not None:
         cfg = replace(cfg, num_negative_samples=int(ns.n2v_num_negative_samples))
+    return cfg
+
+
+def rotate_config_from_run_gpu_method_args(ns: Any) -> RotatEConfig:
+    """Build ``RotatEConfig`` from ``run_gpu_method`` argparse namespace."""
+    k = getattr(ns, "rotate_embedding_dim", None)
+    if k is None:
+        k = int(ns.in_dim)
+    batch = getattr(ns, "rotate_batch_size", None)
+    if batch is None:
+        batch = int(getattr(ns, "train_batch_size", 1024) or 1024)
+    eval_bs = int(getattr(ns, "rotate_eval_batch_size", 4096) or 4096)
+    cfg = RotatEConfig(
+        embedding_dim=int(k),
+        epochs=int(ns.epochs),
+        batch_size=int(batch),
+        seed=int(ns.seed),
+        gamma=float(getattr(ns, "rotate_gamma", 12.0)),
+        weight_decay=float(getattr(ns, "rotate_weight_decay", 0.0)),
+        neg_samples=int(getattr(ns, "rotate_neg_samples", 5)),
+        early_stop_patience=int(getattr(ns, "rotate_early_stop_patience", 20)),
+        grad_clip_norm=float(getattr(ns, "rotate_grad_clip", 1.0)),
+        eval_batch_size=max(256, eval_bs),
+    )
+    if getattr(ns, "learning_rate", None) is not None:
+        cfg = replace(cfg, learning_rate=float(ns.learning_rate))
     return cfg
 
 

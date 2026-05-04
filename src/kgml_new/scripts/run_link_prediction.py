@@ -154,7 +154,7 @@ def run_link_prediction_experiment(args: argparse.Namespace) -> dict:
             cfg.out_dim,
             num_layers=cfg.num_layers,
             dropout=cfg.dropout,
-            neighbor_aggr=cfg.neighbor_aggr,
+            aggr=cfg.neighbor_aggr,
         )
         train_unsupervised(
             model,

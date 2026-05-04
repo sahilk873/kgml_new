@@ -14,6 +14,7 @@ from kgml_new.config import (
     TrainConfig,
     link_mlp_config_from_run_gpu_method_args,
     node2vec_config_from_run_gpu_method_args,
+    rotate_config_from_run_gpu_method_args,
     train_config_from_run_gpu_method_args,
 )
 from kgml_new.logging_config import parse_log_level, setup_kgml_logging
@@ -34,6 +35,7 @@ from kgml_new.data.prepared_dataset_cache import (
 )
 from kgml_new.embeddings.semantic import (
     DEFAULT_GLOSSARY_PATH,
+    build_onehot_relation_tensor,
     build_relation_tensor,
     compute_semantic_similarity_matrix,
     relation_embeddings_from_graph,
@@ -41,11 +43,13 @@ from kgml_new.embeddings.semantic import (
 from kgml_new.models.baseline_gcn import BaselineGCN
 from kgml_new.models.baseline_sage import NEIGHBOR_AGGREGATIONS, BaselineGraphSAGE
 from kgml_new.models.edge_aware_sage import EDGE_RELATION_MODES, build_edge_aware_model
+from kgml_new.models.rotate import RotatE
 from kgml_new.models.semantic_relation_inject import (
     FilmSageSemanticInjectBundle,
     RelDistMultDecodeHead,
 )
 from kgml_new.training.relation_decode_batch import build_canonical_uv_relation_lookup
+from kgml_new.training.rotate_train import train_rotate_with_validation
 from kgml_new.eval.ood_difficulty import (
     OODDifficultyConfig,
     build_ood_json_payload,
@@ -103,8 +107,10 @@ def parse_args() -> argparse.Namespace:
             "baseline_sage",
             "baseline_gcn",
             "edge_aware_sage",
+            "edge_aware_sage_onehot",
             "edge_aware_sage_node_emb",
             "edge_aware_sage_film_semdec",
+            "rotate",
             "node2vec",
             "link_mlp",
             "edge_aware_link_mlp",
@@ -124,6 +130,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-col", type=str, default=PRIMEKG_CSV_SPEC.target_col)
     parser.add_argument(
         "--relation-col", type=str, default=PRIMEKG_CSV_SPEC.relation_col
+    )
+    parser.add_argument(
+        "--edge-attr-col",
+        action="append",
+        default=None,
+        metavar="COL",
+        help="Extra CSV columns copied onto edges as attributes (repeat flag). "
+        "Default: use GraphCSVSpec.edge_attr_cols when omitted.",
     )
     parser.add_argument(
         "--source-type-col", type=str, default=PRIMEKG_CSV_SPEC.source_type_col
@@ -479,10 +493,67 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional wall-clock timeout in seconds for the whole study.",
     )
+    parser.add_argument(
+        "--rotate-embedding-dim",
+        type=int,
+        default=None,
+        dest="rotate_embedding_dim",
+        help="RotatE complex dimension K (entity embedding width is 2K). Default: --in-dim.",
+    )
+    parser.add_argument(
+        "--rotate-gamma",
+        type=float,
+        default=12.0,
+        help="RotatE score scale: logits = -gamma * ||h∘r - t||^2.",
+    )
+    parser.add_argument(
+        "--rotate-weight-decay",
+        type=float,
+        default=0.0,
+        help="Adam weight decay for RotatE.",
+    )
+    parser.add_argument(
+        "--rotate-neg-samples",
+        type=int,
+        default=5,
+        help="Number of tail-corruption negatives per positive during RotatE training.",
+    )
+    parser.add_argument(
+        "--rotate-batch-size",
+        type=int,
+        default=None,
+        dest="rotate_batch_size",
+        help="RotatE mini-batch size (default: --train-batch-size or 1024).",
+    )
+    parser.add_argument(
+        "--rotate-eval-batch-size",
+        type=int,
+        default=4096,
+        dest="rotate_eval_batch_size",
+        help="Batch size for RotatE validation/test triple scoring.",
+    )
+    parser.add_argument(
+        "--rotate-grad-clip",
+        type=float,
+        default=1.0,
+        help="Gradient clipping norm for RotatE (0 disables).",
+    )
+    parser.add_argument(
+        "--rotate-early-stop-patience",
+        type=int,
+        default=20,
+        help="Stop RotatE after this many epochs without validation improvement.",
+    )
     return parser.parse_args()
 
 
 def _csv_spec_from_args(args: argparse.Namespace) -> GraphCSVSpec:
+    extra_cols = getattr(args, "edge_attr_col", None)
+    edge_attr_cols = (
+        tuple(extra_cols)
+        if extra_cols is not None
+        else PRIMEKG_CSV_SPEC.edge_attr_cols
+    )
     return GraphCSVSpec(
         source_col=args.source_col,
         target_col=args.target_col,
@@ -494,7 +565,7 @@ def _csv_spec_from_args(args: argparse.Namespace) -> GraphCSVSpec:
         node_type_attr=PRIMEKG_CSV_SPEC.node_type_attr,
         relation_attr=PRIMEKG_CSV_SPEC.relation_attr,
         default_node_type=PRIMEKG_CSV_SPEC.default_node_type,
-        edge_attr_cols=PRIMEKG_CSV_SPEC.edge_attr_cols,
+        edge_attr_cols=edge_attr_cols,
         directed=False,
     )
 
@@ -1006,6 +1077,7 @@ def _finalize_eval_and_ood(
         if args.method
         in (
             "edge_aware_sage",
+            "edge_aware_sage_onehot",
             "edge_aware_sage_node_emb",
             "edge_aware_sage_film_semdec",
             "edge_aware_link_mlp",
@@ -1123,6 +1195,7 @@ def run_gpu_method_experiment(
         if args.method
         in (
             "edge_aware_sage",
+            "edge_aware_sage_onehot",
             "edge_aware_sage_node_emb",
             "edge_aware_sage_film_semdec",
             "edge_aware_link_mlp",
@@ -1134,6 +1207,7 @@ def run_gpu_method_experiment(
         in (
             "baseline_sage",
             "edge_aware_sage",
+            "edge_aware_sage_onehot",
             "edge_aware_sage_node_emb",
             "edge_aware_sage_film_semdec",
             "link_mlp",
@@ -1167,7 +1241,7 @@ def run_gpu_method_experiment(
             cfg.out_dim,
             num_layers=cfg.num_layers,
             dropout=cfg.dropout,
-            neighbor_aggr=cfg.neighbor_aggr,
+            aggr=cfg.neighbor_aggr,
         )
         _LOG.info("phase=train_start (baseline_sage batched)")
         model, last_epoch, history = train_unsupervised_batched(
@@ -1332,36 +1406,44 @@ def run_gpu_method_experiment(
             embeddings=z,
         )
 
-    elif args.method == "edge_aware_sage":
+    elif args.method in ("edge_aware_sage", "edge_aware_sage_onehot"):
+        is_onehot = args.method == "edge_aware_sage_onehot"
+        phase = "edge_aware_sage_onehot" if is_onehot else "edge_aware_sage"
         _LOG.info(
-            "phase=model edge_aware_sage neighbor_aggr=%s edge_relation_mode=%s "
+            "phase=model %s neighbor_aggr=%s edge_relation_mode=%s "
             "semantic_cache=%s embedding_resolved=%s",
+            phase,
             args.neighbor_aggr,
             args.edge_relation_mode,
             args.semantic_cache,
-            _resolved_embedding_model(args),
+            "onehot" if is_onehot else _resolved_embedding_model(args),
         )
         cfg = train_config_from_run_gpu_method_args(args)
         edge_dim = cfg.edge_dim
-        _LOG.info("phase=relation_table (edge_aware)")
-        relation_table, relation_init = build_edge_aware_relation_table(
-            args=args,
-            training_graph=dataset.graph,
-            relation_lookup=relation_lookup,
-            edge_dim=edge_dim,
-            device=device,
-        )
+        if is_onehot:
+            _LOG.info("phase=relation_table (onehot ablation; semantic embeddings disabled)")
+            relation_table = build_onehot_relation_tensor(relation_lookup, device)
+            relation_init = "onehot"
+            semantic_sim_matrix = None
+        else:
+            _LOG.info("phase=relation_table (edge_aware)")
+            relation_table, relation_init = build_edge_aware_relation_table(
+                args=args,
+                training_graph=dataset.graph,
+                relation_lookup=relation_lookup,
+                edge_dim=edge_dim,
+                device=device,
+            )
+            semantic_sim_matrix = _maybe_build_semantic_similarity_for_alignment(
+                args=args,
+                graph=dataset.graph,
+                relation_lookup=relation_lookup,
+                relation_table=relation_table,
+                device=device,
+            )
         model = build_edge_aware_encoder(cfg=cfg, relation_table=relation_table)
 
-        semantic_sim_matrix = _maybe_build_semantic_similarity_for_alignment(
-            args=args,
-            graph=dataset.graph,
-            relation_lookup=relation_lookup,
-            relation_table=relation_table,
-            device=device,
-        )
-
-        _LOG.info("phase=train_start (edge_aware_sage batched)")
+        _LOG.info("phase=train_start (%s batched)", phase)
         model, last_epoch, history = train_unsupervised_batched(
             model,
             train_data,
@@ -1395,7 +1477,7 @@ def run_gpu_method_experiment(
                 val_pos_edge_index=val_pos,
                 val_neg_edge_index=val_neg,
             )
-        _LOG.info("phase=eval_val (edge_aware_sage)")
+        _LOG.info("phase=eval_val (%s)", phase)
         val_metrics = evaluate_inductive_link_prediction(
             model,
             dataset.train_data,
@@ -1410,7 +1492,7 @@ def run_gpu_method_experiment(
             query_buckets=val_query_buckets,
             return_scores=return_scores,
         )
-        _LOG.info("phase=eval_test (edge_aware_sage)")
+        _LOG.info("phase=eval_test (%s)", phase)
         test_metrics = evaluate_inductive_link_prediction(
             model,
             dataset.train_data,
@@ -1430,6 +1512,10 @@ def run_gpu_method_experiment(
         else:
             output["train_embedding_shape"] = [int(train_data.num_nodes), int(cfg.out_dim)]
         output["relation_init"] = relation_init
+        if is_onehot:
+            output["semantic"] = False
+            output["embedding_model_resolved"] = "onehot"
+            output["relation_embedding_ablation"] = "onehot"
         output["last_epoch"] = last_epoch
         output["history"] = history_dict(history)
         if decoder_history is not None:
@@ -1724,6 +1810,89 @@ def run_gpu_method_experiment(
             test_neg=test_neg,
         )
 
+    elif args.method == "rotate":
+        if dataset.positive_edge_attr is None or dataset.train_pos_edge_attr is None:
+            raise SystemExit(
+                "RotatE requires relation-labeled edges (edge_attr). "
+                "Use a CSV/graph where each edge has a relation type."
+            )
+        r_cfg = rotate_config_from_run_gpu_method_args(args)
+        num_rel = int(max(relation_lookup.values())) + 1
+        _LOG.info(
+            "phase=model rotate K=%s num_relations=%s gamma=%s",
+            r_cfg.embedding_dim,
+            num_rel,
+            r_cfg.gamma,
+        )
+        rot_model = RotatE(
+            num_entities=int(train_data.num_nodes),
+            num_relations=num_rel,
+            embedding_dim=r_cfg.embedding_dim,
+            gamma=r_cfg.gamma,
+        )
+        query_uv_relation = build_canonical_uv_relation_lookup(
+            dataset.positive_edge_index,
+            dataset.positive_edge_attr,
+        )
+        _LOG.info("phase=train_start (rotate)")
+        rot_model, last_epoch, history, val_metrics, test_metrics = (
+            train_rotate_with_validation(
+                rot_model,
+                train_data,
+                train_pos,
+                dataset.train_pos_edge_attr,
+                r_cfg,
+                device,
+                val_pos_edge_index=val_pos,
+                val_neg_edge_index=val_neg,
+                negatives_per_pos=dataset.negatives_per_pos,
+                query_uv_relation=query_uv_relation,
+                val_query_buckets=val_query_buckets,
+                test_pos_edge_index=test_pos,
+                test_neg_edge_index=test_neg,
+                test_query_buckets=test_query_buckets,
+                return_scores=return_scores,
+            )
+        )
+        _LOG.info("phase=train_done last_epoch=%s", last_epoch)
+        output["train_embedding_shape"] = [
+            int(train_data.num_nodes),
+            2 * r_cfg.embedding_dim,
+        ]
+        output["rotate_config"] = {
+            "embedding_dim": r_cfg.embedding_dim,
+            "gamma": r_cfg.gamma,
+            "neg_samples": r_cfg.neg_samples,
+            "weight_decay": r_cfg.weight_decay,
+        }
+        output["last_epoch"] = last_epoch
+        output["history"] = history_dict(history)
+        if args.split_protocol in ("node", "node_category"):
+            output["warning"] = (
+                "RotatE is transductive: all nodes share one learned embedding table; "
+                "behavior on node-disjoint splits differs from inductive GNN encoders."
+            )
+            output["comparable_under_node_split"] = False
+        else:
+            output["comparable_under_node_split"] = True
+        _finalize_eval_and_ood(
+            output,
+            val_metrics=val_metrics,
+            test_metrics=test_metrics,
+            args=args,
+            dataset=dataset,
+            train_pos=train_pos,
+            val_pos=val_pos,
+            val_neg=val_neg,
+            test_pos=test_pos,
+            test_neg=test_neg,
+        )
+        _save_run_artifacts(
+            args=args,
+            output=output,
+            encoder_model=rot_model,
+        )
+
     elif args.method == "node2vec":
         cfg = node2vec_config_from_run_gpu_method_args(args)
         _, z, last_epoch, history = train_node2vec_embeddings_with_validation(
@@ -1754,8 +1923,9 @@ def run_gpu_method_experiment(
         if args.compute_ood_difficulty:
             _LOG.warning(
                 "OOD difficulty is not available for node2vec (no per-edge score export); "
-                "use baseline_sage, edge_aware_sage, edge_aware_sage_node_emb, "
-                "edge_aware_sage_film_semdec, link_mlp, or edge_aware_link_mlp."
+                "use baseline_sage, edge_aware_sage, edge_aware_sage_onehot, "
+                "edge_aware_sage_node_emb, edge_aware_sage_film_semdec, link_mlp, or "
+                "edge_aware_link_mlp."
             )
         _save_run_artifacts(
             args=args,
@@ -1771,7 +1941,7 @@ def run_gpu_method_experiment(
             base_cfg.out_dim,
             num_layers=base_cfg.num_layers,
             dropout=base_cfg.dropout,
-            neighbor_aggr=base_cfg.neighbor_aggr,
+            aggr=base_cfg.neighbor_aggr,
         )
         base_model, base_last_epoch, base_history = train_unsupervised_batched(
             base_model,

@@ -711,6 +711,23 @@ def build_relation_tensor(
     return table
 
 
+def build_onehot_relation_tensor(
+    relation_lookup: dict[str, int],
+    device: torch.device,
+) -> torch.Tensor:
+    """
+    Relation feature table where row ``i`` is the one-hot vector for relation index ``i``.
+
+    Shape ``(R, R)`` with ``R = max(relation indices) + 1``. The edge-aware encoder's
+    ``relation_projection`` maps ``R -> edge_dim``, equivalent to an embedding lookup
+    with a learned matrix when semantic embeddings are replaced by this ablation.
+    """
+    if not relation_lookup:
+        raise ValueError("relation_lookup must be non-empty")
+    num_relations = max(relation_lookup.values()) + 1
+    return torch.eye(num_relations, dtype=torch.float32, device=device)
+
+
 def compute_semantic_similarity_matrix(
     relation_embeddings: dict[str, torch.Tensor],
     relation_lookup: dict[str, int],
