@@ -28,6 +28,7 @@ from kgml_new.data.loaders import (
     load_graph_csv,
     load_pickled_graph,
 )
+from kgml_new.data.triples import TripleKGDataset, load_triple_kg_dataset
 from kgml_new.data.prepared_dataset_cache import (
     graph_csv_spec_to_dict,
     input_fingerprint,
@@ -39,15 +40,18 @@ from kgml_new.embeddings.semantic import (
     build_relation_tensor,
     compute_semantic_similarity_matrix,
     relation_embeddings_from_graph,
+    relation_embeddings_from_relation_types,
 )
 from kgml_new.models.baseline_gcn import BaselineGCN
 from kgml_new.models.baseline_sage import NEIGHBOR_AGGREGATIONS, BaselineGraphSAGE
 from kgml_new.models.edge_aware_sage import EDGE_RELATION_MODES, build_edge_aware_model
 from kgml_new.models.rotate import RotatE
+from kgml_new.models.rgcn import RGCNEncoder
 from kgml_new.models.semantic_relation_inject import (
     FilmSageSemanticInjectBundle,
     RelDistMultDecodeHead,
 )
+from kgml_new.models.triple_decoders import build_triple_decoder
 from kgml_new.training.relation_decode_batch import build_canonical_uv_relation_lookup
 from kgml_new.training.rotate_train import train_rotate_with_validation
 from kgml_new.eval.ood_difficulty import (
@@ -66,6 +70,10 @@ from kgml_new.training.link_unsupervised import (
     compute_node_embeddings,
     train_unsupervised_batched,
     train_unsupervised_fullgraph,
+)
+from kgml_new.training.kg_completion import (
+    filtered_ranking_metrics,
+    train_encoder_triple_decoder,
 )
 from kgml_new.training.node2vec_train import (
     train_node2vec_embeddings_with_validation,
@@ -110,6 +118,7 @@ def parse_args() -> argparse.Namespace:
             "edge_aware_sage_onehot",
             "edge_aware_sage_node_emb",
             "edge_aware_sage_film_semdec",
+            "rgcn",
             "rotate",
             "node2vec",
             "link_mlp",
@@ -157,8 +166,19 @@ def parse_args() -> argparse.Namespace:
         choices=("global", "type_matched"),
         default=None,
     )
+    parser.add_argument(
+        "--task",
+        choices=("kg_completion", "pairwise_link_prediction"),
+        default="kg_completion",
+        help="kg_completion: relation-aware triple prediction with filtered ranking; "
+        "pairwise_link_prediction: legacy sampled pairwise edge prediction.",
+    )
     parser.add_argument("--negatives-per-pos", type=int, default=20)
-    parser.add_argument("--decoder", choices=("dot", "mlp"), default="dot")
+    parser.add_argument(
+        "--decoder",
+        choices=("distmult", "triple_mlp", "dot", "mlp"),
+        default="distmult",
+    )
     parser.add_argument(
         "--shuffle-relations",
         action=argparse.BooleanOptionalAction,
@@ -613,6 +633,20 @@ def build_dataset(args: argparse.Namespace):
     return graph, dataset
 
 
+def build_triple_dataset(args: argparse.Namespace) -> TripleKGDataset:
+    source = _load_graph(args) if _resolved_input_format_for_args(args) == "pickle" else args.input_path
+    return load_triple_kg_dataset(
+        source,
+        spec=_csv_spec_from_args(args),
+        in_dim=args.in_dim,
+        seed=args.seed,
+        val_ratio=0.1,
+        test_ratio=0.1,
+        split_protocol=args.split_protocol,
+        max_edges=args.max_edges,
+    )
+
+
 def _resolved_input_format_for_args(args: argparse.Namespace) -> str:
     if args.input_format != "auto":
         return str(args.input_format)
@@ -876,6 +910,46 @@ def build_edge_aware_relation_table(
     return relation_table, relation_init
 
 
+def build_kg_relation_features(
+    *,
+    args: argparse.Namespace,
+    relation_lookup: dict[str, int],
+    feature_dim: int,
+    device: torch.device,
+    onehot: bool = False,
+) -> tuple[torch.Tensor, str]:
+    if onehot:
+        return build_onehot_relation_tensor(relation_lookup, device), "onehot"
+    embedding_model = _resolved_embedding_model(args)
+    rel_types = sorted(relation_lookup.keys())
+    rel_emb = relation_embeddings_from_relation_types(
+        rel_types,
+        edge_dim=feature_dim,
+        cache_path=args.semantic_cache,
+        embedding_model=embedding_model,
+        relation_text_mode=args.relation_text_mode,
+        strict_embedding=args.strict_semantic,
+        glossary_path=args.glossary_path or DEFAULT_GLOSSARY_PATH,
+        sapbert_model=args.sapbert_model,
+        e5_model=args.e5_model,
+        gemini_model=args.gemini_model,
+    )
+    missing = sorted(set(relation_lookup) - set(rel_emb))
+    extra = sorted(set(rel_emb) - set(relation_lookup))
+    if missing:
+        raise SystemExit(
+            "Relation embedding cache does not cover the KG relation set. "
+            f"Missing relations: {missing[:20]}"
+        )
+    if extra:
+        raise SystemExit(
+            "Relation embedding cache has relations not present in this KG run. "
+            f"Extra relations: {extra[:20]}"
+        )
+    init = f"{embedding_model}_semantic" if embedding_model != "random" else "random"
+    return build_relation_tensor(rel_emb, relation_lookup, feature_dim, device), init
+
+
 def build_edge_aware_encoder(
     *,
     cfg: TrainConfig,
@@ -1121,6 +1195,166 @@ def _finalize_eval_and_ood(
     _LOG.info("phase=ood_csv path=%s", csv_path.resolve())
 
 
+def run_kg_completion_experiment(
+    args: argparse.Namespace,
+    *,
+    device: torch.device,
+    dataset: TripleKGDataset,
+) -> dict:
+    if args.method not in {
+        "baseline_sage",
+        "baseline_gcn",
+        "edge_aware_sage",
+        "edge_aware_sage_onehot",
+        "rgcn",
+    }:
+        raise SystemExit(
+            f"--task kg_completion is currently implemented for encoder methods "
+            f"baseline_sage, baseline_gcn, edge_aware_sage, edge_aware_sage_onehot, and rgcn; "
+            f"got {args.method!r}. Use --task pairwise_link_prediction for the legacy path."
+        )
+    decoder_name = "triple_mlp" if args.decoder == "mlp" else args.decoder
+    if decoder_name not in {"distmult", "triple_mlp", "dot"}:
+        raise SystemExit(
+            f"Decoder {args.decoder!r} is not valid for kg_completion. "
+            "Use distmult, triple_mlp, or dot (relation-agnostic ablation)."
+        )
+
+    cfg = train_config_from_run_gpu_method_args(args)
+    onehot = args.method == "edge_aware_sage_onehot"
+    relation_features, relation_init = build_kg_relation_features(
+        args=args,
+        relation_lookup=dataset.relation_lookup,
+        feature_dim=cfg.out_dim,
+        device=device,
+        onehot=onehot,
+    )
+    edge_aware = args.method in {"edge_aware_sage", "edge_aware_sage_onehot"}
+    if args.method == "baseline_sage":
+        encoder = BaselineGraphSAGE(
+            cfg.in_dim,
+            cfg.hidden_dim,
+            cfg.out_dim,
+            num_layers=cfg.num_layers,
+            dropout=cfg.dropout,
+            aggr=cfg.neighbor_aggr,
+        )
+    elif args.method == "baseline_gcn":
+        encoder = BaselineGCN(
+            cfg.in_dim,
+            cfg.hidden_dim,
+            cfg.out_dim,
+            num_layers=cfg.num_layers,
+            dropout=cfg.dropout,
+        )
+    elif args.method == "rgcn":
+        encoder = RGCNEncoder(
+            cfg.in_dim,
+            cfg.hidden_dim,
+            cfg.out_dim,
+            num_relations=len(dataset.relation_lookup),
+            num_layers=cfg.num_layers,
+            dropout=cfg.dropout,
+        )
+    else:
+        encoder = build_edge_aware_encoder(
+            cfg=cfg,
+            relation_table=relation_features,
+        )
+
+    decoder = build_triple_decoder(
+        decoder_name,
+        relation_features=relation_features.detach().cpu(),
+        embedding_dim=cfg.out_dim,
+        dropout=float(getattr(args, "link_mlp_dropout", None) or 0.1),
+    )
+    encoder, decoder, last_epoch, history = train_encoder_triple_decoder(
+        encoder,
+        decoder,
+        dataset.train_data,
+        dataset.train_triples,
+        dataset.triples,
+        cfg,
+        edge_aware=edge_aware,
+        device=device,
+        val_triples=dataset.val_triples,
+    )
+    val_metrics = filtered_ranking_metrics(
+        encoder,
+        decoder,
+        dataset.train_data,
+        dataset.val_triples,
+        dataset.triples,
+        node_types=dataset.node_types,
+        edge_aware=edge_aware,
+        device=device,
+    )
+    test_metrics = filtered_ranking_metrics(
+        encoder,
+        decoder,
+        dataset.train_data,
+        dataset.test_triples,
+        dataset.triples,
+        node_types=dataset.node_types,
+        edge_aware=edge_aware,
+        device=device,
+    )
+    output = {
+        "task": "kg_completion",
+        "method": args.method,
+        "device": str(device),
+        "input_path": str(args.input_path),
+        "input_format": args.input_format,
+        "seed": int(args.seed),
+        "split_protocol": dataset.split_protocol,
+        "val_ratio": dataset.val_ratio,
+        "test_ratio": dataset.test_ratio,
+        "num_nodes": len(dataset.node_names),
+        "num_relations": len(dataset.relation_lookup),
+        "num_train_triples": int(dataset.train_triples.size(0)),
+        "num_val_triples": int(dataset.val_triples.size(0)),
+        "num_test_triples": int(dataset.test_triples.size(0)),
+        "decoder": decoder_name,
+        "relation_init": relation_init,
+        "ranking_candidate_policies": ["all_entities", "type_constrained"],
+        "semantic": bool(args.semantic) and not onehot,
+        "semantic_cache": str(args.semantic_cache) if args.semantic_cache else None,
+        "embedding_model": args.embedding_model,
+        "embedding_model_resolved": "onehot" if onehot else _resolved_embedding_model(args),
+        "relation_text_mode": args.relation_text_mode,
+        "edge_relation_mode": args.edge_relation_mode if edge_aware else None,
+        "neighbor_aggr": args.neighbor_aggr if args.method == "baseline_sage" or edge_aware else None,
+        "in_dim": cfg.in_dim,
+        "hidden_dim": cfg.hidden_dim,
+        "out_dim": cfg.out_dim,
+        "edge_dim": cfg.edge_dim,
+        "num_layers": cfg.num_layers,
+        "learning_rate": cfg.learning_rate,
+        "dropout": cfg.dropout,
+        "train_batch_size": cfg.batch_size,
+        "train_negatives_per_pos": cfg.neg_samples,
+        "epochs": cfg.epochs,
+        "last_epoch": last_epoch,
+        "history": history_dict(history),
+        "val_metrics": val_metrics,
+        "test_metrics": test_metrics,
+        "metrics": test_metrics["type_constrained"],
+        "parameter_count": int(
+            sum(p.numel() for p in encoder.parameters())
+            + sum(p.numel() for p in decoder.parameters())
+        ),
+        "evaluation_protocol": "filtered ranking KG completion over (h,r,t), reporting all-entity and type-constrained head/tail ranks",
+    }
+    _save_run_artifacts(
+        args=args,
+        output=output,
+        encoder_model=encoder,
+        decoder_model=decoder,
+        extra_tensors={"relation_table": relation_features},
+    )
+    return output
+
+
 def run_gpu_method_experiment(
     args: argparse.Namespace,
     *,
@@ -1147,6 +1381,7 @@ def run_gpu_method_experiment(
     test_query_buckets = [diversity_buckets[int(node)] for node in test_pos[0].tolist()]
 
     output = {
+        "task": "pairwise_link_prediction",
         "method": args.method,
         "device": str(device),
         "cuda_available": torch.cuda.is_available(),
@@ -2154,7 +2389,18 @@ def main() -> None:
         args.split_protocol,
         args.epochs,
     )
-    if args.prepared_dataset_cache is not None:
+    if args.task == "pairwise_link_prediction" and args.decoder in {"distmult", "triple_mlp"}:
+        _LOG.warning(
+            "Pairwise link prediction does not use decoder=%s; using dot instead.",
+            args.decoder,
+        )
+        args.decoder = "dot"
+    if args.task == "kg_completion":
+        if args.prepared_dataset_cache is not None:
+            raise SystemExit("--prepared-dataset-cache is only supported for pairwise_link_prediction")
+        dataset = build_triple_dataset(args)
+        graph = None
+    elif args.prepared_dataset_cache is not None:
         pcache = Path(args.prepared_dataset_cache)
         if not pcache.is_file():
             raise SystemExit(f"Prepared dataset cache not found: {pcache}")
@@ -2171,11 +2417,18 @@ def main() -> None:
         graph = dataset.graph
     else:
         graph, dataset = build_dataset(args)
-    _LOG.info(
-        "phase=data_done num_train_nodes=%s train_edges=%s",
-        int(dataset.train_data.num_nodes),
-        int(dataset.split.train_pos_edge_index.size(1)),
-    )
+    if args.task == "kg_completion":
+        _LOG.info(
+            "phase=data_done task=kg_completion nodes=%s train_triples=%s",
+            len(dataset.node_names),
+            int(dataset.train_triples.size(0)),
+        )
+    else:
+        _LOG.info(
+            "phase=data_done num_train_nodes=%s train_edges=%s",
+            int(dataset.train_data.num_nodes),
+            int(dataset.split.train_pos_edge_index.size(1)),
+        )
     if args.optuna_trials > 0:
         if args.method == "node2vec" and args.split_protocol in (
             "node",
@@ -2210,9 +2463,12 @@ def main() -> None:
             t_args = copy.deepcopy(args)
             suggest_run_gpu_method_params(trial, t_args)
             seed_everything(optuna_seed + trial.number * 100_003)
-            out = run_gpu_method_experiment(
-                t_args, device=device, graph=graph, dataset=dataset
-            )
+            if t_args.task == "kg_completion":
+                out = run_kg_completion_experiment(t_args, device=device, dataset=dataset)
+            else:
+                out = run_gpu_method_experiment(
+                    t_args, device=device, graph=graph, dataset=dataset
+                )
             vm = out.get("val_metrics")
             if not vm:
                 return float("-inf")
@@ -2233,9 +2489,12 @@ def main() -> None:
         t_args = copy.deepcopy(args)
         apply_param_dict_to_namespace(t_args, study.best_params)
         seed_everything(optuna_seed)
-        output = run_gpu_method_experiment(
-            t_args, device=device, graph=graph, dataset=dataset
-        )
+        if t_args.task == "kg_completion":
+            output = run_kg_completion_experiment(t_args, device=device, dataset=dataset)
+        else:
+            output = run_gpu_method_experiment(
+                t_args, device=device, graph=graph, dataset=dataset
+            )
         output["optuna"] = {
             "n_trials": len(study.trials),
             "best_value": study.best_value,
@@ -2245,9 +2504,12 @@ def main() -> None:
             "study_name": getattr(study, "study_name", None),
         }
     else:
-        output = run_gpu_method_experiment(
-            args, device=device, graph=graph, dataset=dataset
-        )
+        if args.task == "kg_completion":
+            output = run_kg_completion_experiment(args, device=device, dataset=dataset)
+        else:
+            output = run_gpu_method_experiment(
+                args, device=device, graph=graph, dataset=dataset
+            )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     _LOG.info("phase=write_json path=%s", args.output.resolve())
     args.output.write_text(json.dumps(output, indent=2))

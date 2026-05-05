@@ -86,13 +86,98 @@ If semantic relation embeddings are used, `OPENAI_API_KEY` must be present. The 
 Important files and directories in this repo:
 
 - [data/kg.csv](data/kg.csv): PrimeKG-style CSV
+- [data/primekg.tsv](data/primekg.tsv): PrimeKG TSV used by the newer prepared-cache full sweep
 - [drkg.tsv](drkg.tsv): DRKG edge list TSV
 - [relation_glossary.tsv](relation_glossary.tsv): glossary used for DRKG-style sourced predicates
 - [cache](cache): relation and node embedding caches
 - [results](results): experiment outputs if created
+- [results/slurm/artifacts](results/slurm/artifacts): saved encoders, train embedding tensors, relation tables, and UMAP-ready artifacts from SLURM runs
 - [results/ood](results/ood): optional OOD difficulty CSV exports and multi-run aggregates (created when using those flags)
 - [scripts/slurm](scripts/slurm): SLURM launch scripts
 - [data/drkg-shuffled-seed42.tsv](data/drkg-shuffled-seed42.tsv): reproducible shuffled DRKG subset helper
+
+## Current PrimeKG Node2Vec / UMAP Notes
+
+Recent context future agents should preserve:
+
+- User asked for PrimeKG `node2vec` trained from [data/kg.csv](data/kg.csv), with enough saved under [results/slurm/artifacts](results/slurm/artifacts) to run UMAP later with node-type coloring from `kg.csv`.
+- Do **not** replace or mutate older SLURM scripts for this workflow. A new script was created:
+  - [scripts/slurm/run_node2vec_primekg_kgcsv_umap.slurm](scripts/slurm/run_node2vec_primekg_kgcsv_umap.slurm)
+- A standalone runner was created:
+  - [scripts/train_node2vec_kgcsv_cache.py](scripts/train_node2vec_kgcsv_cache.py)
+- Intended outputs for job id `JOBID` are:
+  - `results/slurm/artifacts/primekg_edge_node2vec_kgcsv_${JOBID}.train_embeddings.pt`
+  - `results/slurm/artifacts/primekg_edge_node2vec_kgcsv_${JOBID}.model.pt`
+  - `results/slurm/primekg_edge_node2vec_kgcsv_${JOBID}.json`
+  - `logs/slurm/kgml-node2vec-primekg-kgcsv-${JOBID}.out`
+  - `logs/slurm/kgml-node2vec-primekg-kgcsv-${JOBID}.err`
+  - `logs/slurm/run-primekg-edge-node2vec-kgcsv-${JOBID}.log`
+- Submitted jobs:
+  - `3270769`: failed before data load because `run_gpu_method` imported missing local modules (`kgml_new.models.baseline_gcn`).
+  - `3270963`: failed on `gput057` after `00:01:21` because `torch_geometric.nn.Node2Vec` requires `pyg-lib` or `torch-cluster` in this venv. Error: `ImportError: 'Node2Vec' requires either the 'pyg-lib' or 'torch-cluster' package`.
+- If resubmitting this workflow, first either install a compatible `pyg-lib`/`torch-cluster` into `.venv` or modify `scripts/train_node2vec_kgcsv_cache.py` to use the repo's internal lightweight node2vec fallback. Do not assume PyG `Node2Vec` works on the cluster venv.
+- The standalone runner saves a dict payload with keys `embeddings`, `node_types`, `node_names`, `node_ids`, and `source`. This is intended for UMAP as `kind: node_cache`, because node labels are carried in the artifact and aligned to embedding rows by `x_index`/`y_index`.
+- UMAP entry point:
+  - [src/kgml_new/scripts/umap_compare_methods.py](src/kgml_new/scripts/umap_compare_methods.py)
+- `umap_compare_methods` can load:
+  - `kind: tensor`: plain tensor payloads, row labels usually supplied separately.
+  - `kind: node_cache`: dict payload with `embeddings` and optional `node_types`. This is the right kind for the `kg.csv` node2vec artifact from `scripts/train_node2vec_kgcsv_cache.py`.
+  - `kind: edge_aware_encoder`: reconstructs embeddings from encoder checkpoints and prepared cache.
+- Existing PrimeKG UMAP manifest:
+  - [figures/umap/manifest_primekg_edge.json](figures/umap/manifest_primekg_edge.json)
+  - It currently references baseline GCN, baseline SAGE, edge-aware encoders, and HGT export. Add node2vec only after the artifact exists.
+- A minimal node2vec-only manifest after a successful job should look like:
+
+```json
+[
+  {
+    "name": "node2vec_kgcsv",
+    "path": "results/slurm/artifacts/primekg_edge_node2vec_kgcsv_JOBID.train_embeddings.pt",
+    "kind": "node_cache",
+    "embeddings_key": "embeddings"
+  }
+]
+```
+
+- UMAP command for the node2vec artifact alone:
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=src python -m kgml_new.scripts.umap_compare_methods \
+  --manifest figures/umap/manifest_primekg_node2vec_kgcsv.json \
+  --output-dir figures/umap/out \
+  --stem primekg_node2vec_kgcsv_umap \
+  --title "PrimeKG node2vec kg.csv" \
+  --layout faceted \
+  --max-nodes 12000 \
+  --seed 42 \
+  --color-by labels \
+  --save-npz
+```
+
+- If comparing the `node_cache` artifact against tensor/encoder methods in the same UMAP run, use `--layout faceted`; `umap_compare_methods.py` intentionally rejects joint layouts mixing `node_cache` row order with tensor graph row order.
+
+## PrimeKG/FB15k Full Sweep Array Mapping
+
+The command the user referenced:
+
+```bash
+cd /scratch/pioneer/users/sxk2517/kgml_new
+sbatch --array=0,1,4,5 scripts/slurm/primekg_fb15k_full_sweep_array.slurm
+```
+
+maps array IDs in [scripts/slurm/primekg_fb15k_full_sweep_array.slurm](scripts/slurm/primekg_fb15k_full_sweep_array.slurm) as:
+
+- datasets: `primekg`, `fb15k237`
+- splits: `edge`, `node`
+- method specs: `node2vec`, `baseline_gcn`, `baseline_sage`, `edge_aware_sage_openai`, `edge_aware_sage_gemini`, `edge_aware_sage_e5`
+- `task 0`: `primekg edge node2vec`
+- `task 1`: `primekg edge baseline_gcn`
+- `task 4`: `primekg edge edge_aware_sage_gemini`
+- `task 5`: `primekg edge edge_aware_sage_e5`
+- `task 6`: `primekg node node2vec`
+
+That full sweep uses [data/primekg.tsv](data/primekg.tsv) plus prepared caches such as `cache/primekg-prepared_edge_s42_d128.pkl`; it is not the same as the user's requested `kg.csv` node2vec rerun.
 
 ## Main Experiment Entry Points
 
