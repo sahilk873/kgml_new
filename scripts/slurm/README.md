@@ -2,7 +2,7 @@
 
 This folder contains GPU and CPU Slurm scripts for **DRKG** (and compatible KGs) **link prediction** using `python -m kgml_new.scripts.run_gpu_method`. Read this before changing scripts or debugging jobs.
 
-For general experiment conventions (splits, CLI), see [`EXPERIMENTS.md`](../../EXPERIMENTS.md) and [`AGENTS.md`](../../AGENTS.md).
+For general experiment conventions (splits, CLI), see [`EXPERIMENTS.md`](../../EXPERIMENTS.md).
 
 ---
 

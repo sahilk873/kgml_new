@@ -7,7 +7,7 @@ This repository supports two main experiment families:
 
 The default benchmark for link prediction is the node-disjoint split. That is the main setting to use when comparing methods intended to generalize to unseen entities.
 
-For cache formats, embedding APIs, DRKG caveats, and **checklists for code changes**, see [`AGENTS.md`](AGENTS.md).
+For cache formats, embedding APIs, DRKG caveats, and experiment conventions, see this file and the README.
 
 ## End-to-end experimental procedure
 
@@ -255,7 +255,7 @@ Minimal example:
   --save-edge-predictions
 ```
 
-Full flag list, graph policy, aggregation across seeds, and `pytest` coverage are documented in [AGENTS.md](AGENTS.md) under **`run_gpu_method` → OOD difficulty analysis**.
+Full flag list, graph policy, aggregation across seeds, and `pytest` coverage are documented in the OOD difficulty section of this file.
 
 ### Common commands
 

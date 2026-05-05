@@ -1,6 +1,6 @@
 # Knowledge Graph Relation Embedding Experiments
 
-**How to run experiments (setup, splits, CLIs, smoke tests):** see [EXPERIMENTS.md](EXPERIMENTS.md). **Maintainer/agent conventions (APIs, caches, caveats):** see [AGENTS.md](AGENTS.md).
+**How to run experiments (setup, splits, CLIs, smoke tests):** see [EXPERIMENTS.md](EXPERIMENTS.md).
 
 This document tracks all experiments investigating why semantic relation embeddings don't help (and sometimes hurt) edge-aware GraphSAGE experiments on knowledge graphs.
 

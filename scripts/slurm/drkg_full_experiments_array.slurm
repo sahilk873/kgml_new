@@ -30,7 +30,7 @@
 # Default input is ${REPO}/drkg.tsv (full DRKG at repo root). Override if the file lives elsewhere:
 #   sbatch --export=ALL,DRKG_INPUT=/path/to/drkg.tsv scripts/slurm/drkg_full_experiments_array.slurm
 #
-# Optional subset (first N rows of the table; see AGENTS.md / README for DRKG ordering caveats):
+# Optional subset (first N rows of the table; see README for DRKG ordering caveats):
 #   sbatch --export=ALL,MAX_EDGES=25000,DRKG_INPUT=data/drkg-shuffled-seed42.tsv ...
 #
 # Recommended: skip slow CSV→NetworkX on every array task — export pickle + diversity sidecar once,
