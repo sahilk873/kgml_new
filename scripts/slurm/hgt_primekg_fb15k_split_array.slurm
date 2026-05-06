@@ -22,7 +22,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
 #SBATCH --time=72:00:00
-#SBATCH --array=0-3
+#SBATCH --array=0-3%4
 #SBATCH --output=logs/slurm/kgml-hgt-primekg-fb15k-%A_%a.out
 #SBATCH --error=logs/slurm/kgml-hgt-primekg-fb15k-%A_%a.err
 

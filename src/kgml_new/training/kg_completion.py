@@ -74,7 +74,7 @@ def train_encoder_triple_decoder(
         list(encoder.parameters()) + list(decoder.parameters()),
         lr=config.learning_rate,
     )
-    gen = torch.Generator(device="cpu")
+    gen = torch.Generator(device=device.type)
     gen.manual_seed(int(config.seed))
     history = TrainingHistory(edge_aware=edge_aware, num_neighbors=None)
     history.config = asdict(config)

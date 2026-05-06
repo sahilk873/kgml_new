@@ -8,6 +8,10 @@ from pathlib import Path
 import pandas as pd
 import torch
 
+from kgml_new.config import Node2VecConfig
+from kgml_new.data.graph import networkx_to_data
+from kgml_new.training.node2vec_train import train_node2vec_embeddings
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train node2vec on PrimeKG kg.csv and save UMAP cache.")
@@ -66,10 +70,15 @@ def main() -> None:
     num_nodes = len(node_names)
     device = torch.device(args.device)
 
-    from torch_geometric.nn import Node2Vec
+    import networkx as nx
 
-    model = Node2Vec(
-        edge_index.to(device),
+    g = nx.Graph()
+    for i in range(num_nodes):
+        g.add_node(i, node_type=node_types[i], name=node_names[i], node_id=node_ids[i])
+    for src, dst in edge_index.t().tolist():
+        g.add_edge(int(src), int(dst), relationship="kg")
+    data, _ = networkx_to_data(g, in_dim=args.embed_dim, seed=args.seed)
+    cfg = Node2VecConfig(
         embedding_dim=args.embed_dim,
         walk_length=args.walk_length,
         context_size=args.context_size,
@@ -77,32 +86,13 @@ def main() -> None:
         p=args.p,
         q=args.q,
         num_negative_samples=args.num_negative_samples,
-        num_nodes=num_nodes,
-        sparse=False,
-    ).to(device)
-    loader = model.loader(batch_size=args.batch_size, shuffle=True)
-    opt = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
-
-    losses: list[float] = []
-    for epoch in range(args.epochs):
-        model.train()
-        total = 0.0
-        batches = 0
-        for pos_rw, neg_rw in loader:
-            opt.zero_grad(set_to_none=True)
-            loss = model.loss(pos_rw.to(device), neg_rw.to(device))
-            loss.backward()
-            opt.step()
-            total += float(loss.detach().cpu())
-            batches += 1
-        avg = total / max(batches, 1)
-        losses.append(avg)
-        if epoch % 10 == 0 or epoch == args.epochs - 1:
-            print(f"epoch={epoch:04d} loss={avg:.4f}", flush=True)
-
-    model.eval()
-    with torch.inference_mode():
-        embeddings = model().detach().cpu()
+        learning_rate=args.learning_rate,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        seed=args.seed,
+    )
+    model, embeddings, _ = train_node2vec_embeddings(data, cfg, device=device)
+    losses = []
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.model_output.parent.mkdir(parents=True, exist_ok=True)
@@ -138,7 +128,14 @@ def main() -> None:
                     "model_state_dict": str(args.model_output),
                 },
                 "history": {"train_loss": losses},
-                "config": vars(args) | {"input": str(args.input), "output": str(args.output)},
+                "config": {
+                    **{
+                        k: str(v) if isinstance(v, Path) else v
+                        for k, v in vars(args).items()
+                    },
+                    "input": str(args.input),
+                    "output": str(args.output),
+                },
             },
             indent=2,
         )

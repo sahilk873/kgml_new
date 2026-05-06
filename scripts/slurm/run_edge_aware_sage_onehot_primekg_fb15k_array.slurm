@@ -85,6 +85,21 @@ if [[ ! -f "${PREPARED_CACHE}" ]]; then
   exit 1
 fi
 
+CSV_SPEC_EXTRA=(--relation-col "${CSV_RELATION_COL:-relation}")
+if [[ "${CSV_EDGE_ATTR_COLS:-}" == "none" ]]; then
+  :
+elif [[ -n "${CSV_EDGE_ATTR_COLS:-}" ]]; then
+  IFS=',' read -ra _eat <<< "${CSV_EDGE_ATTR_COLS}"
+  for c in "${_eat[@]}"; do
+    c="${c// /}"
+    [[ -n "${c}" ]] && CSV_SPEC_EXTRA+=(--edge-attr-col "${c}")
+  done
+else
+  for c in display_relation x_source y_source; do
+    CSV_SPEC_EXTRA+=(--edge-attr-col "${c}")
+  done
+fi
+
 MAX_EXTRA=()
 if [[ -n "${MAX_EDGES:-}" ]]; then
   MAX_EXTRA=(--max-edges "${MAX_EDGES}")
@@ -106,7 +121,9 @@ set -x
 python -m kgml_new.scripts.run_gpu_method \
   --require-cuda \
   --method edge_aware_sage_onehot \
+  --task pairwise_link_prediction \
   --input "${INPUT}" \
+  "${CSV_SPEC_EXTRA[@]}" \
   --input-format auto \
   --split-protocol "${SPLIT}" \
   --seed "${SEED}" \
